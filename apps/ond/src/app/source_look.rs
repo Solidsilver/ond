@@ -8,6 +8,12 @@
 //! comes from, and every page looks as it did before there could be
 //! several.
 //!
+//! Where a list has columns (Albums as a list, Songs, the track lists of
+//! playlists and Favorites), the source is a column of its own, a dot and
+//! a name, narrow and the first to go when the window is. Under a title (a
+//! tile's artist, a queue row's) the dot follows the line, so the lines
+//! under a title start where it does.
+//!
 //! What's said about a source comes in two lengths. The switcher's menu and
 //! the sidebar's tooltip get the short one ("Synced 9:41 AM", "3 files
 //! skipped"); Settings › Sources gets the long one (the server's label, a
@@ -73,6 +79,14 @@ pub fn mark_of<'m>(session: &Session, marks: &'m SourceMarks, id: &str) -> Optio
         return None;
     }
     marks.get(identity::account(id)?)
+}
+
+/// Whether the items `ids` come from more than one source. Compares the
+/// account part of each id as text, so a long list costs no parsing.
+pub fn spans<'i>(mut ids: impl Iterator<Item = &'i str>) -> bool {
+    let account = |id: &'i str| id.split_once('/').map(|(a, _)| a);
+    let Some(first) = ids.next().map(account) else { return false };
+    ids.any(|id| account(id) != first)
 }
 
 /// How much is said about a source under its name.
@@ -162,6 +176,25 @@ impl ViewCtx<'_> {
     /// sources.
     pub fn source_dot(&self, id: &str) -> Option<SourceColor> {
         mark_of(self.session, &self.ui.prefs.sources, id).map(|m| m.color)
+    }
+
+    /// The source of the item `id`, while the library mixes sources: what
+    /// a Source column shows.
+    pub fn source_mark(&self, id: &str) -> Option<&Mark> {
+        mark_of(self.session, &self.ui.prefs.sources, id)
+    }
+
+    /// Whether the library on screen mixes sources, so a list shows its
+    /// Source column.
+    pub fn mixed_sources(&self) -> bool {
+        mixed(self.session)
+    }
+
+    /// Whether a list of `tracks` shows its Source column: the library mixes
+    /// sources and the list holds songs from more than one (an album, or a
+    /// server's playlist, comes from one, and says so elsewhere).
+    pub fn sources_column(&self, tracks: &[library::Track]) -> bool {
+        mixed(self.session) && spans(tracks.iter().map(|t| t.id.as_str()))
     }
 
     /// The filter chips under a library page's heading, in All sources with

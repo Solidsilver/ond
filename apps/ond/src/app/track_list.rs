@@ -29,6 +29,10 @@ const ROW_H: f32 = 38.0;
 const ROW_H_ARTIST: f32 = 44.0;
 /// Room above a disc heading after the first.
 const DISC_GAP: f32 = 12.0;
+/// The Source column, before the heart, while the list holds songs from
+/// more than one source; and the room the title keeps before it gives way.
+const SOURCE_W: f32 = 120.0;
+const SOURCE_MIN_TEXT: f32 = 240.0;
 
 impl ListOpts {
     pub fn row_h(&self) -> f32 {
@@ -44,11 +48,14 @@ struct List<'l> {
     opts: &'l ListOpts,
     /// The playing track's identity.
     current: Option<&'l crate::source::TrackKey>,
+    /// The songs come from more than one source, so rows have a Source
+    /// column where there's room.
+    sources: bool,
 }
 
 impl<'l> List<'l> {
-    fn new(ui: &Ui, player: &'l crate::player::Player, tracks: &'l [Track], source: &'l Source, opts: &'l ListOpts) -> Self {
-        Self { t: Tokens::of(ui), tracks, source, opts, current: player.queue.current.as_ref().map(|c| &c.key) }
+    fn new(ui: &Ui, player: &'l crate::player::Player, tracks: &'l [Track], source: &'l Source, opts: &'l ListOpts, sources: bool) -> Self {
+        Self { t: Tokens::of(ui), tracks, source, opts, current: player.queue.current.as_ref().map(|c| &c.key), sources }
     }
 
     /// The line where a reorder drag would land, at `drop_at`'s y.
@@ -101,7 +108,7 @@ impl ViewCtx<'_> {
 
     fn track_list_in(&mut self, ui: &mut Ui, tracks: &[Track], source: &Source, opts: ListOpts) {
         let moved = self.track_list_keys(ui, tracks, source, opts.playlist.as_deref());
-        let list = List::new(ui, self.player, tracks, source, &opts);
+        let list = List::new(ui, self.player, tracks, source, &opts, self.sources_column(tracks));
         let discs = if opts.numbers { tracks.iter().filter_map(|t| t.disc).max().unwrap_or(1) } else { 1 };
         let mut last_disc = None;
         let mut drop_at = None;
@@ -142,7 +149,7 @@ impl ViewCtx<'_> {
             self.take_reveal(&tracks[i], i);
         }
         let bring = revealed.map(|i| (i, Some(egui::Align::Center))).or_else(|| self.ui.track_sel.filter(|_| moved).map(|i| (i, None)));
-        let list = List::new(ui, self.player, tracks, source, &opts);
+        let list = List::new(ui, self.player, tracks, source, &opts, self.sources_column(tracks));
         let h = opts.row_h();
         // Rows sit flush: the scroll area places them by the same height.
         ui.spacing_mut().item_spacing.y = 0.0;
@@ -272,12 +279,19 @@ impl ViewCtx<'_> {
             }
         }
         let actions_w = if hovered { col::ACTIONS_W } else { 0.0 };
-        let text_w = rect.right() - col::TEXT_FROM_RIGHT - actions_w - x;
+        // The Source column sits just before the heart, and gives way first
+        // to a narrow window; the hover actions take its place.
+        let text_end = rect.right() - col::TEXT_FROM_RIGHT;
+        let source = (list.sources && text_end - SOURCE_W - x >= SOURCE_MIN_TEXT).then(|| self.source_mark(&tr.id)).flatten();
+        let source_w = if source.is_some() { SOURCE_W } else { 0.0 };
+        let text_w = text_end - actions_w.max(source_w) - x;
+        if let Some(mark) = source.filter(|_| !hovered) {
+            let name = (mark.name.as_str(), FontId::proportional(12.0), t.muted);
+            shell::kit::source_cell(ui, text_end - SOURCE_W + col::INSET, cy, SOURCE_W - 2.0 * col::INSET, mark.color, name);
+        }
         let title_font = title_font(13.0, playing);
         if opts.artist {
-            // Where it comes from leads the artist, while sources are mixed.
-            let artist = (tr.artist.as_deref().unwrap_or(""), FontId::proportional(12.0), t.muted);
-            row.two_lines_from(ui, x, text_w, (&tr.title, title_font, color), artist, self.source_dot(&tr.id));
+            row.two_lines(ui, x, text_w, (&tr.title, title_font, color), (tr.artist.as_deref().unwrap_or(""), FontId::proportional(12.0), t.muted));
         } else {
             let title_w = row.line(ui, x, text_w, &tr.title, title_font, color);
             if hovered {

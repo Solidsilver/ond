@@ -158,18 +158,22 @@ impl ViewCtx<'_> {
         // Header, over the columns (clear of the alphabet rail).
         let mut head_rect = super::table::head_rect(ui, marks.is_some());
         head_rect.set_width(head_rect.width().min(TABLE_MAX_W));
-        let cols = columns(head_rect);
+        let sources = self.mixed_sources();
+        let cols = columns(head_rect, sources);
         let head = |label, rect, right, col| Head { label, rect, right, sorts: Some(col) };
         // The title column starts after the playing marker's gutter, so the
         // header sits over the text.
         let title_head = Rect::from_min_max(cols.title.min + vec2(col::PLAYING_W, 0.0), cols.title.max);
-        let heads = [
+        let mut heads = vec![
             head("Title", title_head, false, Column::Title),
             head("Artist", cols.artist, false, Column::Artist),
             head("Album", cols.album, false, Column::Album),
             head("Time", cols.time, true, Column::Time),
             head("Format", cols.format, false, Column::Format),
         ];
+        if let Some(source) = cols.source {
+            heads.insert(2, Head { label: "Source", rect: source, right: false, sorts: None });
+        }
         super::table::header(ui, head_rect, "songs-col", &heads, &mut self.ui.songs.sort, &mut self.ui.songs.descending);
 
         // Borrowed from the library and player, not from `self`, so rows can
@@ -188,19 +192,19 @@ impl ViewCtx<'_> {
                 ui.scroll_to_rect(Rect::from_min_size(pos2(ui.cursor().left(), top), vec2(ui.available_width(), ROW_H)), None);
             }
             for i in range {
-                self.songs_row(ui, &t, &tracks[order[i]], i, current);
+                self.songs_row(ui, &t, &tracks[order[i]], i, current, sources);
             }
         });
     }
 
     /// The `i`th row in the sorted order: a cell per column.
-    fn songs_row(&mut self, ui: &mut Ui, t: &Tokens, tr: &Track, i: usize, current: Option<&crate::source::TrackKey>) {
+    fn songs_row(&mut self, ui: &mut Ui, t: &Tokens, tr: &Track, i: usize, current: Option<&crate::source::TrackKey>, sources: bool) {
         let row = TrackRow::new(ui, ROW_H, Sense::click());
         let selected = self.ui.focus == Focus::Main && self.ui.songs.selected == Some(i);
         let playing = current.is_some_and(|key| crate::source::matches_track(key, self.session.account(), &tr.id));
         if ui.is_rect_visible(row.rect) {
             row.fill(ui, t, selected, row.pointer_on());
-            let c = columns(row.rect);
+            let c = columns(row.rect, sources);
             let color = crate::widgets::track_color(t, playing, self.playable(tr));
             row.mark(ui, c.time.left() + col::INSET, self.download_state(tr));
             // The marker has a gutter of its own, so titles line up whether or not one is playing.
@@ -214,12 +218,11 @@ impl ViewCtx<'_> {
                 row.line(ui, x, w - 2.0 * col::INSET, text, font, color);
             };
             cell(ui, &tr.title, title_x, c.title.right() - title_x + col::INSET, title_font(13.0, playing), color);
-            // Where it comes from leads the artist, while sources are mixed.
-            let (artist_x, artist_w) = match self.source_dot(&tr.id) {
-                Some(color) => (shell::kit::source_dot_lead(ui, c.artist.left() + col::INSET, row.cy(), color), c.artist.width() - shell::kit::DOT_LEAD),
-                None => (c.artist.left() + col::INSET, c.artist.width()),
-            };
-            cell(ui, tr.artist.as_deref().unwrap_or(""), artist_x, artist_w, FontId::proportional(13.0), t.muted);
+            cell(ui, tr.artist.as_deref().unwrap_or(""), c.artist.left() + col::INSET, c.artist.width(), FontId::proportional(13.0), t.muted);
+            if let (Some(r), Some(mark)) = (c.source, self.source_mark(&tr.id)) {
+                let name = (mark.name.as_str(), FontId::proportional(13.0), t.muted);
+                shell::kit::source_cell(ui, r.left() + col::INSET, row.cy(), r.width() - 2.0 * col::INSET, mark.color, name);
+            }
             let album = self.data.album(&tr.album_id).map_or("", |a| a.name.as_str());
             cell(ui, album, c.album.left() + col::INSET, c.album.width(), FontId::proportional(13.0), t.muted);
             row.right_text(ui, c.time.right() - col::INSET, length(tr), FontId::proportional(12.0), t.muted);
@@ -275,17 +278,32 @@ impl ViewCtx<'_> {
 struct Columns {
     title: Rect,
     artist: Rect,
+    /// While the list mixes sources and there's room for it.
+    source: Option<Rect>,
     album: Rect,
     time: Rect,
     format: Rect,
 }
 
 /// Title gets what's left after fixed time/format and proportional artist/album.
-fn columns(row: Rect) -> Columns {
+/// The Source column (`sources`) comes after the artist, and is the first to
+/// go when the shared columns would be left too little.
+fn columns(row: Rect, sources: bool) -> Columns {
+    use super::album_list::SOURCE_W;
+    if sources && row.width() - TIME_W - FORMAT_W - SOURCE_W >= SOURCE_MIN_FLEX {
+        let [title, artist, source, album, time, format] = super::table::columns(
+            row,
+            [Width::Share(0.4), Width::Share(0.3), Width::Fixed(SOURCE_W), Width::Share(0.3), Width::Fixed(TIME_W), Width::Fixed(FORMAT_W)],
+        );
+        return Columns { title, artist, source: Some(source), album, time, format };
+    }
     let [title, artist, album, time, format] =
         super::table::columns(row, [Width::Share(0.4), Width::Share(0.3), Width::Share(0.3), Width::Fixed(TIME_W), Width::Fixed(FORMAT_W)]);
-    Columns { title, artist, album, time, format }
+    Columns { title, artist, source: None, album, time, format }
 }
+
+/// What title, artist and album keep before the Source column gives way.
+const SOURCE_MIN_FLEX: f32 = 360.0;
 
 impl ViewCtx<'_> {
     pub(super) fn album_source(&self, album_id: &str) -> Source {
