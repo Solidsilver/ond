@@ -209,7 +209,7 @@ impl kit::PaletteRows for Hits<'_> {
         let (title, detail, dot) = match hit {
             Hit::Artist(i) => {
                 let a = &index.artists[i];
-                super::artists::avatar(self.art, ui, tile, a.cover.as_deref(), &a.name, &a.album_covers);
+                super::artists::avatar(self.art, ui, tile, a.cover.as_deref().as_slice(), &a.name, &a.album_covers);
                 (a.name.clone(), format!("Artist · {}", crate::fmt::plural(a.albums, "album")), None)
             }
             Hit::Album(i) => {

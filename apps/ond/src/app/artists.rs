@@ -109,7 +109,7 @@ impl ViewCtx<'_> {
             let photo = Rect::from_min_size(rect.min, vec2(tile, tile));
             // Photos off: no pictures at all, the initials alone.
             let (cover, albums) = if self.ui.prefs.artist_photos { (a.cover.as_deref(), a.album_covers.as_slice()) } else { (None, &[][..]) };
-            avatar(self.art, ui, photo, cover, &a.name, albums);
+            avatar(self.art, ui, photo, cover.as_slice(), &a.name, albums);
             let name = elide(ui, &a.name, FontId::proportional(13.0), t.text, tile);
             ui.painter().galley(pos2(rect.center().x - name.size().x / 2.0, photo.bottom() + 7.0), name, t.text);
             let sub = elide(ui, &albums_and_years(a), FontId::proportional(12.0), t.muted, tile);
@@ -164,7 +164,7 @@ impl ViewCtx<'_> {
             let mut x = c.name.left() + col::INSET;
             if photos {
                 let face = Rect::from_center_size(pos2(x + AVATAR / 2.0, row.cy()), vec2(AVATAR, AVATAR));
-                avatar(self.art, ui, face, a.cover.as_deref(), &a.name, &a.album_covers);
+                avatar(self.art, ui, face, a.cover.as_deref().as_slice(), &a.name, &a.album_covers);
                 x = face.right() + 10.0;
             }
             row.line(ui, x, c.name.right() - col::INSET - x, &a.name, FontId::proportional(13.0), t.text);
@@ -234,15 +234,36 @@ fn albums_and_years(a: &ArtistEntry) -> String {
     }
 }
 
-/// An artist's photo in a circle. Without one (the server has none, or it's
-/// still loading, or there's no `photo` to ask for), up to four of their
+/// Every photo an artist could show, the one on `id`'s source first, and
+/// their album covers. In All sources the same artist on another server is
+/// another chance at a photo: a server without one sends only its stand-in,
+/// which [`Art::portrait`] hides, so the page goes on to the next server's.
+pub(super) fn faces<'a>(index: &'a crate::search::SearchIndex, data: &'a super::Data, id: Option<&str>, name: &str) -> (Vec<&'a str>, Vec<String>) {
+    let group = data.merged_artist(id, name);
+    // The index keeps one entry for a merged artist, under its first member.
+    let entry = index.artist(id, name).or_else(|| group.and_then(|g| index.artist(Some(&g.members[0].key.to_string()), &g.members[0].name)));
+    let mut photos: Vec<&str> = Vec::new();
+    let members = group.map(|g| g.members.as_slice()).unwrap_or_default();
+    let own = members.iter().filter(|m| id.is_some_and(|id| m.key.to_string() == id));
+    let candidates = own.chain(members.iter()).filter_map(|m| m.photo.as_deref()).chain(entry.and_then(|a| a.cover.as_deref()));
+    for photo in candidates {
+        if !photos.contains(&photo) {
+            photos.push(photo);
+        }
+    }
+    (photos, entry.map(|a| a.album_covers.clone()).unwrap_or_default())
+}
+
+/// An artist's photo in a circle: the first of `photos` that's loaded and
+/// isn't a server's stand-in. Without one (the server has none, or it's
+/// still loading, or there's no photo to ask for), up to four of their
 /// `albums`' covers that are already loaded share the circle; with none of
 /// those either, it's a disc in a colour of their own with their initials.
 /// Album covers are only ever drawn here, never asked for: the disc costs no
 /// request of its own.
-pub(super) fn avatar(art: &mut Art, ui: &Ui, rect: Rect, photo: Option<&str>, name: &str, albums: &[String]) {
+pub(super) fn avatar(art: &mut Art, ui: &Ui, rect: Rect, photos: &[&str], name: &str, albums: &[String]) {
     let radius = egui::CornerRadius::same((rect.width() / 2.0).min(255.0) as u8);
-    if let Some(tex) = photo.and_then(|c| art.portrait(c, rect.width())) {
+    if let Some(tex) = photos.iter().find_map(|c| art.portrait(c, rect.width())) {
         ui.painter().add(egui::epaint::RectShape::filled(rect, radius, egui::Color32::WHITE).with_texture(tex.id(), crate::art::crop_uv(1.0)));
         return;
     }

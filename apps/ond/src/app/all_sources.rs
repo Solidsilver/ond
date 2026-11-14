@@ -1103,6 +1103,30 @@ mod tests {
     }
 
     #[test]
+    fn an_artist_page_tries_the_photo_from_its_own_source_then_each_other_sources() {
+        let dir = tempfile::tempdir().unwrap();
+        let one = server();
+        let two = server();
+        let mut app = rig(dir.path(), &one, &two);
+        for a in [account(1), account(2)] {
+            let mut album = fixture::album(0);
+            album.id = "1".into();
+            album.artist = Some("Same".into());
+            album.artist_ref = Some("1".into());
+            album.artists.clear();
+            inject(&mut app, Msg::Source { account: a, session: 0, message: Box::new(LibraryMsg::Albums(vec![album]).into()) });
+            let artist = Artist { id: "1".into(), name: "Same".into(), sort: None, album_count: 1, cover_art: Some("ar-1".into()) };
+            inject(&mut app, Msg::Source { account: a, session: 0, message: Box::new(LibraryMsg::Artists(vec![artist]).into()) });
+        }
+        app.rebuild_search();
+        let index = app.search.index.as_ref().unwrap();
+        for (first, second) in [(account(2), account(1)), (account(1), account(2))] {
+            let (photos, _) = super::super::artists::faces(index, &app.data, Some(&key(first, "1")), "Same");
+            assert_eq!(photos, [key(first, "ar-1"), key(second, "ar-1")], "opened from {first}");
+        }
+    }
+
+    #[test]
     fn every_signed_out_source_opens_its_cached_mirror_before_any_connection() {
         let dir = tempfile::tempdir().unwrap();
         let mut entries = Vec::new();

@@ -22,7 +22,7 @@ pub(super) const GAP_Y: f32 = 24.0;
 /// Title + artist lines under the art.
 pub(super) const LABEL_H: f32 = 40.0;
 /// The photo beside an artist page's name.
-const ARTIST_PHOTO: f32 = 96.0;
+pub(super) const ARTIST_PHOTO: f32 = 96.0;
 
 /// Short name for a place, for breadcrumbs.
 pub fn route_label(route: &Route, data: &Data) -> String {
@@ -168,13 +168,18 @@ impl OndApp {
             _ => None,
         };
         // Their photo, else their albums' covers or initials, as in Artists.
-        let entry =
-            self.ui.prefs.artist_photos.then(|| self.search.index.as_ref()?.artist(id, name).map(|a| (a.cover.clone(), a.album_covers.clone()))).flatten();
+        let (photos, albums) = match self.search.index.as_ref().filter(|_| self.ui.prefs.artist_photos) {
+            Some(index) => {
+                let (photos, albums) = super::artists::faces(index, &self.data, id, name);
+                (photos.into_iter().map(str::to_owned).collect(), albums)
+            }
+            None => (Vec::new(), Vec::new()),
+        };
         ui.horizontal(|ui| {
             if self.ui.prefs.artist_photos {
-                let (photo, albums) = entry.unwrap_or_default();
+                let photos: Vec<&str> = photos.iter().map(String::as_str).collect();
                 let (rect, _) = ui.allocate_exact_size(vec2(ARTIST_PHOTO, ARTIST_PHOTO), Sense::hover());
-                super::artists::avatar(&mut self.art, ui, rect, photo.as_deref(), name, &albums);
+                super::artists::avatar(&mut self.art, ui, rect, &photos, name, &albums);
                 ui.add_space(14.0);
             }
             ui.vertical(|ui| self.artist_header(ui, route, name, sub, !own.is_empty()));

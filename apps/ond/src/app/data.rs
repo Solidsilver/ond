@@ -206,7 +206,12 @@ impl Data {
             }
         }
         let identities = artists.iter().filter_map(|a| {
-            Some(ArtistIdentity { key: accounts::ItemKey::parse(&a.id).ok()?, name: a.name.clone(), musicbrainz: self.artist_mbids.get(&a.id).cloned() })
+            Some(ArtistIdentity {
+                key: accounts::ItemKey::parse(&a.id).ok()?,
+                name: a.name.clone(),
+                musicbrainz: self.artist_mbids.get(&a.id).cloned(),
+                photo: a.cover_art.clone(),
+            })
         });
         let mut groups = merge(identities);
         let mut by_id = HashMap::<String, usize>::new();

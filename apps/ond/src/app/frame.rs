@@ -27,6 +27,7 @@ impl OndApp {
         // The covers' ids are borrowed (this runs every frame): a cover's tints
         // once its look is worked out, `None` meanwhile.
         let full = self.ui.prefs.mode == WindowMode::Full;
+        let page_cover = self.page_cover_in(full);
         let (art, cache) = (&mut self.art, &mut self.ui.tint_cache);
         let mut cover_tints = |cover: &str| art.look(cover).map(|look| cache.cover(cover, look.palette.as_ref()));
         let playing_cover = self.player.queue.current.as_ref().and_then(|c| self.data.cover_for(&c.track));
@@ -34,8 +35,7 @@ impl OndApp {
             Some(cover) => cover_tints(cover).or(self.ui.tint.target()).unwrap_or(base),
             None => base,
         };
-        let page_cover = page_cover(self.ui.nav.current(), full, &self.data, self.search.index.as_ref(), self.ui.prefs.artist_photos);
-        let page = match page_cover {
+        let page = match page_cover.as_ref().map(Option::as_deref) {
             Some(Some(cover)) if adapt => cover_tints(cover).or(self.ui.page_tint.target()).unwrap_or(playing),
             Some(None) if adapt => base,
             _ => playing,
@@ -52,9 +52,21 @@ impl OndApp {
 
     /// The cover the page takes its colors from (see [`page_cover`]).
     #[cfg(test)]
-    pub(super) fn page_cover(&self) -> Option<Option<String>> {
+    pub(super) fn page_cover(&mut self) -> Option<Option<String>> {
         let full = self.prefs_now().mode == WindowMode::Full;
-        page_cover(self.ui.nav.current(), full, &self.data, self.search.index.as_ref(), self.ui.prefs.artist_photos).map(|c| c.map(str::to_owned))
+        self.page_cover_in(full)
+    }
+
+    /// An artist's page takes the photo it shows: the first that's loaded
+    /// and not a server's stand-in, from whichever source has one.
+    fn page_cover_in(&mut self, full: bool) -> Option<Option<String>> {
+        let route = self.ui.nav.current();
+        let covers = page_covers(route, full, &self.data, self.search.index.as_ref(), self.ui.prefs.artist_photos)?;
+        let cover = match route {
+            Route::Artist { .. } => covers.iter().copied().find(|c| self.art.portrait(c, super::browse::ARTIST_PHOTO).is_some()),
+            _ => covers.first().copied(),
+        };
+        Some(cover.map(str::to_owned))
     }
 
     /// Waveform seek bar: has the playing track's peaks read once a complete
@@ -126,13 +138,13 @@ impl OndApp {
     }
 }
 
-/// The cover a page takes its colors from: `Some` on an album's page, or an
-/// artist's while their photos show, in the full window (`Some(None)` for
-/// one without), `None` on any other page.
-fn page_cover<'a>(route: &Route, full: bool, data: &'a super::Data, index: Option<&'a crate::search::SearchIndex>, photos: bool) -> Option<Option<&'a str>> {
+/// The covers a page may take its colors from: `Some` on an album's page, or
+/// an artist's while their photos show (each source's, in turn), in the full
+/// window (`Some` of none for one without), `None` on any other page.
+fn page_covers<'a>(route: &Route, full: bool, data: &'a super::Data, index: Option<&'a crate::search::SearchIndex>, photos: bool) -> Option<Vec<&'a str>> {
     match route {
-        Route::Album(id) if full => Some(data.album(id).and_then(|a| a.cover_art.as_deref())),
-        Route::Artist { name, id } if full && photos => Some(index.and_then(|i| i.artist(id.as_deref(), name)).and_then(|a| a.cover.as_deref())),
+        Route::Album(id) if full => Some(data.album(id).and_then(|a| a.cover_art.as_deref()).into_iter().collect()),
+        Route::Artist { name, id } if full && photos => Some(index.map(|i| super::artists::faces(i, data, id.as_deref(), name).0).unwrap_or_default()),
         _ => None,
     }
 }

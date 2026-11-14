@@ -17,6 +17,9 @@ pub struct ArtistIdentity {
     pub key: ItemKey,
     pub name: String,
     pub musicbrainz: Option<String>,
+    /// Their photo on this source, so a merged artist's page can try each
+    /// source's when one has none.
+    pub photo: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -85,7 +88,12 @@ mod tests {
     #[test]
     fn musicbrainz_matches_different_names_and_keeps_distinct_known_artists() {
         let a = AccountId::new();
-        let entry = |id: &str, name: &str, mb: Option<&str>| ArtistIdentity { key: ItemKey::new(a, id), name: name.into(), musicbrainz: mb.map(str::to_owned) };
+        let entry = |id: &str, name: &str, mb: Option<&str>| ArtistIdentity {
+            key: ItemKey::new(a, id),
+            name: name.into(),
+            musicbrainz: mb.map(str::to_owned),
+            photo: None,
+        };
         let groups =
             merge([entry("1", "Björk", Some("one")), entry("2", "Other spelling", Some("one")), entry("3", "BJORK", None), entry("4", "Björk", Some("two"))]);
         assert_eq!(groups.len(), 2);
@@ -96,8 +104,12 @@ mod tests {
     fn empty_or_whitespace_musicbrainz_ids_are_ignored_when_merging() {
         let a = AccountId::new();
         let b = AccountId::new();
-        let entry =
-            |acc, id: &str, name: &str, mb: Option<&str>| ArtistIdentity { key: ItemKey::new(acc, id), name: name.into(), musicbrainz: mb.map(str::to_owned) };
+        let entry = |acc, id: &str, name: &str, mb: Option<&str>| ArtistIdentity {
+            key: ItemKey::new(acc, id),
+            name: name.into(),
+            musicbrainz: mb.map(str::to_owned),
+            photo: None,
+        };
         let groups = merge([
             entry(a, "1", "Josh Garrels", Some("mbid-jg")),
             entry(a, "2", "Stand", Some("")),
