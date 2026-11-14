@@ -44,6 +44,27 @@ struct AppSources<'a> {
     data: &'a Data,
     source_data: &'a std::collections::BTreeMap<accounts::AccountId, Data>,
     now_playing: &'a now_playing::Session,
+    prefer_copy: crate::settings::PreferCopy,
+}
+
+impl AppSources<'_> {
+    fn live_source(&self, account: accounts::AccountId) -> Option<&crate::source::Src> {
+        self.session
+            .get(account)
+            .filter(|s| !s.unreachable && !s.connecting && s.sign_in.is_none() && !(self.session.work_offline && s.source_caps().network))
+            .and_then(|s| s.live())
+            .filter(|s| s.account() == account)
+    }
+
+    fn downloaded(&self, key: &TrackKey) -> Option<std::path::PathBuf> {
+        let offline = if self.offline.owner == Some(key.account) { Some(self.offline) } else { self.other_downloads.get(&key.account) };
+        offline.and_then(|d| d.local_path(key))
+    }
+
+    fn reachable(&self, key: &TrackKey, track: &Track) -> bool {
+        self.session.get(key.account).is_some()
+            && (self.downloaded(key).is_some() || self.live_source(key.account).is_some() || cached(self.cache, self.output, key, track).is_some())
+    }
 }
 
 impl player::Sources for AppSources<'_> {
@@ -54,8 +75,7 @@ impl player::Sources for AppSources<'_> {
         self.session.get(key.account)?;
         let replay_gain = playback::replay_gain(track);
         let album_context = playback::in_album(prev, track, next);
-        let offline = if self.offline.owner == Some(key.account) { Some(self.offline) } else { self.other_downloads.get(&key.account) };
-        if let Some(path) = offline.and_then(|d| d.local_path(key)) {
+        if let Some(path) = self.downloaded(key) {
             return Some(TrackSource {
                 id: stream_name(key).into_owned(),
                 url: format!("file://{}", path.display()),
@@ -66,7 +86,7 @@ impl player::Sources for AppSources<'_> {
                 token,
             });
         }
-        let Some(source) = self.session.get(key.account).and_then(|s| s.live()) else {
+        let Some(source) = self.live_source(key.account) else {
             let path = cached(self.cache, self.output, key, track)?;
             return Some(TrackSource {
                 id: stream_name(key).into_owned(),
@@ -78,14 +98,32 @@ impl player::Sources for AppSources<'_> {
                 token,
             });
         };
-        if source.account() != key.account {
-            return None;
-        }
         let transcode = source.capabilities().transcoding.then(|| self.output.transcode()).flatten();
         let mut bare = track.clone();
         bare.id = key.item.clone();
         let (url, suffix) = source.stream(&bare, transcode.as_ref());
         Some(TrackSource { id: stream_name(key).into_owned(), url, suffix, replay_gain, album_context, transcode, token })
+    }
+
+    fn copies(&self, key: &TrackKey) -> Vec<(TrackKey, Track)> {
+        let spelling = key.to_string();
+        let mut keys = self.data.copies_of_track(&spelling);
+        if keys.len() < 2 {
+            return Vec::new();
+        }
+        if self.prefer_copy == crate::settings::PreferCopy::BestQuality {
+            // Stable sorting leaves equal formats in settings source order.
+            keys.sort_by_key(|key| {
+                let format = self.data.copy_format(&key.to_string());
+                std::cmp::Reverse((format.as_ref().is_some_and(|f| f.lossless), format.and_then(|f| f.bitrate_kbps).unwrap_or(0)))
+            });
+        }
+        keys.into_iter()
+            .filter_map(|key| {
+                let track = self.data.track_copy(&key.to_string())?.clone();
+                self.reachable(&key, &track).then_some((key, track))
+            })
+            .collect()
     }
 
     /// Describes `track` for Now Playing before the engine reaches it.
@@ -292,6 +330,7 @@ impl OndApp {
             data: &self.data,
             source_data: &self.multi.data,
             now_playing: &self.now_playing,
+            prefer_copy: self.prefs_now().prefer_copy,
         };
         let result = f(&mut self.player, &mut player::Ctx { engine: &self.engine, sources: &sources, notes: &mut notes });
         for note in notes {

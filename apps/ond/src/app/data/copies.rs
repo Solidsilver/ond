@@ -16,7 +16,6 @@ impl Data {
     }
 
     /// Every member of a visible song, lead first in settings order.
-    #[allow(dead_code)]
     pub fn copies_of_track(&self, id: &str) -> Vec<ItemKey> {
         self.track_copies.get(self.track_lead(id)).cloned().unwrap_or_else(|| ItemKey::parse(id).ok().into_iter().collect())
     }
@@ -25,7 +24,6 @@ impl Data {
         self.album_leads.get(id).map_or(id, String::as_str)
     }
 
-    #[allow(dead_code)]
     pub fn track_lead<'a>(&'a self, id: &'a str) -> &'a str {
         self.track_leads.get(id).map_or(id, String::as_str)
     }
@@ -36,12 +34,10 @@ impl Data {
         self.copy_albums.get(id).or_else(|| self.album(id))
     }
 
-    #[allow(dead_code)]
     pub fn track_copy(&self, id: &str) -> Option<&Track> {
         self.copy_tracks.as_ref().and_then(|s| s.track(id)).or_else(|| self.track(id))
     }
 
-    #[allow(dead_code)]
     pub fn copy_format(&self, id: &str) -> Option<CopyFormat<'_>> {
         let track = self.track_copy(id)?;
         let suffix = track.suffix.as_deref();

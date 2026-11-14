@@ -51,6 +51,11 @@ pub trait Sources {
     /// offline and not downloaded). The item's uid is echoed back by the
     /// engine; `prev` / `next` are its queue neighbours on the same account.
     fn source(&self, item: &Item, prev: Option<&Track>, next: Option<&Track>) -> Option<TrackSource>;
+    /// Reachable copies of the same song, in preference order. Empty for an
+    /// ordinary song; keys and rows remain the source's real identities.
+    fn copies(&self, _key: &crate::source::TrackKey) -> Vec<(crate::source::TrackKey, Track)> {
+        Vec::new()
+    }
     /// `item` is about to play (Now Playing learns its details early).
     fn announce(&self, item: &Item);
     /// The server isn't answering yet but should be soon (it's connecting):
@@ -424,6 +429,13 @@ impl Player {
         if tracks.is_empty() {
             return;
         }
+        let tracks = tracks
+            .into_iter()
+            .map(|track| {
+                let key = crate::source::identity::key(account, &track.id);
+                cx.sources.copies(&key).into_iter().next().map_or(track, |(_, copy)| copy)
+            })
+            .collect();
         let play_now = |q: &mut Queue, tracks: Vec<Track>, start: usize, source: Source| match on_play {
             Some(on_play) => q.play_now_with(account, tracks, start, source, on_play),
             None => q.play_now(account, tracks, start, source),
