@@ -111,6 +111,7 @@ impl Data {
             self.artist_mbids = sources.iter().flat_map(|d| d.artist_mbids.iter().map(|(k, v)| (k.clone(), v.clone()))).collect();
             self.artists = Arc::new(sources.iter().flat_map(|d| d.artists.iter().cloned()).collect());
             self.rebuild_merged_artists();
+            self.artists_version += 1;
         }
         self.merged_album_versions = albums;
         self.merged_track_versions = tracks;
@@ -153,6 +154,19 @@ impl Data {
             return group.albums.values().flatten().any(|a| a == &album.id);
         }
         album.has_artist(id, name)
+    }
+
+    /// True if `album_id` belongs to a different merged artist with the same
+    /// normalized name (kept apart by distinct MusicBrainz ids), so a homonym's
+    /// own albums don't show up under "Also credited on".
+    pub fn is_other_homonym_album(&self, id: Option<&str>, name: &str, album_id: &str) -> bool {
+        let Some(current) = self.merged_artist(id, name) else { return false };
+        let norm = crate::source::artists::normalize_name(name);
+        self.merged_artists.iter().any(|g| {
+            !std::ptr::eq(g, current)
+                && g.members.iter().any(|m| crate::source::artists::normalize_name(&m.name) == norm)
+                && g.albums.values().flatten().any(|a| a == album_id)
+        })
     }
 
     fn rebuild_merged_artists(&mut self) {

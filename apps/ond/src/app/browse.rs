@@ -351,10 +351,10 @@ enum ArtistLine {
 /// The artist page's memo key for the albums crediting them: the grid's own
 /// route and library version, and a hash of the credited ids, which arrive
 /// without bumping the version.
-pub(super) type CreditedKey = (Route, u64, u64);
+pub(super) type CreditedKey = (Route, u64, u64, u64);
 
 /// The albums that credit `name` and aren't among their `own`, built once
-/// per route, library version and credit list.
+/// per route, library version, artists version and credit list.
 fn credited_albums(memo: &mut crate::memo::Memo<CreditedKey, Vec<usize>>, route: &Route, name: &str, own: &[usize], data: &Data) -> Arc<Vec<usize>> {
     let ids = data.credited.get(name);
     let hash = {
@@ -363,9 +363,19 @@ fn credited_albums(memo: &mut crate::memo::Memo<CreditedKey, Vec<usize>>, route:
         ids.hash(&mut h);
         h.finish()
     };
-    memo.get((route.clone(), data.version, hash), || {
+    let route_id = match route {
+        Route::Artist { id, .. } => id.as_deref(),
+        _ => None,
+    };
+    memo.get((route.clone(), data.version, data.artists_version, hash), || {
         let own_ids: std::collections::HashSet<&str> = own.iter().map(|&i| data.albums[i].id.as_str()).collect();
-        ids.map(|ids| ids.iter().filter(|id| !own_ids.contains(id.as_str())).filter_map(|id| data.by_id.get(id).copied()).collect()).unwrap_or_default()
+        ids.map(|ids| {
+            ids.iter()
+                .filter(|id| !own_ids.contains(id.as_str()) && !data.is_other_homonym_album(route_id, name, id))
+                .filter_map(|id| data.by_id.get(id).copied())
+                .collect()
+        })
+        .unwrap_or_default()
     })
 }
 
@@ -463,7 +473,8 @@ impl ViewCtx<'_> {
 
     pub(super) fn cached_grid(&mut self, route: &Route) -> Arc<Vec<usize>> {
         let (sort, desc, data) = (self.ui.sort, self.ui.sort_desc, &self.data);
-        self.ui.grid.get((route.clone(), sort, desc, data.version), || grid_ids(route, sort, desc, data))
+        let artists_version = if matches!(route, Route::Artist { .. }) { data.artists_version } else { 0 };
+        self.ui.grid.get((route.clone(), sort, desc, data.version, artists_version), || grid_ids(route, sort, desc, data))
     }
 
     /// A full-height, virtualized grid: only visible rows are laid out, so only

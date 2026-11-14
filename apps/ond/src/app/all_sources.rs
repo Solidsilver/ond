@@ -1340,4 +1340,342 @@ mod tests {
         }
         assert!(app.search.index.as_ref().unwrap().albums.iter().all(|al| identity::account(&al.id) == Some(account(1))));
     }
+
+    #[test]
+    fn navidrome_all_sources_artist_pages_merge_across_servers_and_ignore_blank_mbids() {
+        use egui_kittest::Harness;
+        use egui_kittest::kittest::Queryable;
+
+        fn query_param(target: &str, name: &str) -> String {
+            target
+                .split_once('?')
+                .into_iter()
+                .flat_map(|(_, q)| q.split('&'))
+                .filter_map(|p| p.split_once('='))
+                .find(|(k, _)| *k == name)
+                .map(|(_, v)| v.replace('+', " ").replace("%20", " ").replace("%26", "&"))
+                .unwrap_or_default()
+        }
+
+        fn navidrome_server(
+            artists: Vec<serde_json::Value>,
+            albums: Vec<serde_json::Value>,
+            songs_by_album: std::collections::HashMap<&'static str, Vec<serde_json::Value>>,
+            search_songs: std::collections::HashMap<&'static str, Vec<serde_json::Value>>,
+        ) -> JsonFake {
+            JsonFake::start(move |request| {
+                let path = request.path();
+                let body = match path {
+                    "/rest/getArtists" => json!({"artists":{"index":[{"name":"A","artist":artists}]}}),
+                    "/rest/getAlbumList2" => {
+                        let offset: usize = query_param(&request.target, "offset").parse().unwrap_or(0);
+                        let page = if offset == 0 { albums.clone() } else { Vec::new() };
+                        json!({"albumList2":{"album":page}})
+                    }
+                    "/rest/getAlbum" => {
+                        let id = query_param(&request.target, "id");
+                        let album = albums.iter().find(|a| a["id"].as_str() == Some(id.as_str())).cloned().unwrap_or_else(|| json!({"id":id,"name":id}));
+                        let songs = songs_by_album.get(id.as_str()).cloned().unwrap_or_default();
+                        let mut obj = album.as_object().unwrap().clone();
+                        obj.insert("song".into(), json!(songs));
+                        json!({"album":obj})
+                    }
+                    "/rest/search3" => {
+                        let query = query_param(&request.target, "query");
+                        let songs = search_songs.get(query.as_str()).cloned().unwrap_or_default();
+                        json!({"searchResult3":{"song":songs}})
+                    }
+                    "/rest/getPlaylists" => json!({"playlists":{"playlist":[]}}),
+                    "/rest/getStarred2" => json!({"starred2":{}}),
+                    _ => json!({}),
+                };
+                let mut response = json!({"status":"ok","version":"1.16.1"});
+                response.as_object_mut().unwrap().extend(body.as_object().unwrap().clone());
+                Answer::ok(json!({"subsonic-response":response}).to_string())
+            })
+        }
+
+        fn navi_artist(id: &str, name: &str, album_count: u32, mbid: Option<&str>) -> serde_json::Value {
+            let mut v = json!({"id":id,"name":name,"albumCount":album_count});
+            if let Some(m) = mbid {
+                v.as_object_mut().unwrap().insert("musicBrainzId".into(), json!(m));
+            }
+            v
+        }
+
+        fn navi_album(id: &str, name: &str, artist_id: &str, artist_name: &str) -> serde_json::Value {
+            json!({
+                "id": id,
+                "name": name,
+                "artist": artist_name,
+                "artistId": artist_id,
+                "artists": [{"id": artist_id, "name": artist_name}],
+                "songCount": 1,
+                "duration": 200
+            })
+        }
+
+        fn navi_song(id: &str, album_id: &str, album: &str, artist_id: &str, artist_name: &str, title: &str) -> serde_json::Value {
+            json!({
+                "id": id,
+                "parent": album_id,
+                "albumId": album_id,
+                "album": album,
+                "artist": artist_name,
+                "artistId": artist_id,
+                "artists": [{"id": artist_id, "name": artist_name}],
+                "title": title,
+                "duration": 200
+            })
+        }
+
+        let one = navidrome_server(
+            vec![
+                navi_artist("ar-jg", "Josh Garrels", 2, Some("11111111-1111-1111-1111-111111111111")),
+                navi_artist("ar-ss", "Shane & Shane", 1, Some("22222222-2222-2222-2222-222222222222")),
+                navi_artist("ar-jw", "John Williams", 1, Some("33333333-3333-3333-3333-333333333333")),
+                navi_artist("ar-stand", "Stand", 1, Some("")),
+                navi_artist("ar-ps", "Paul Simon", 1, Some("")),
+                navi_artist("ar-man", "Manhattan", 1, Some("")),
+            ],
+            vec![
+                navi_album("al-a-jg-1", "Love & War & the Sea in Between", "ar-jg", "Josh Garrels"),
+                navi_album("al-a-jg-2", "Jacaranda", "ar-jg", "Josh Garrels"),
+                navi_album("al-a-ss-1", "Psalms II", "ar-ss", "Shane & Shane"),
+                navi_album("al-a-jw-1", "Star Wars", "ar-jw", "John Williams"),
+                navi_album("al-a-stand", "Stand", "ar-stand", "Stand"),
+                navi_album("al-a-ps", "Graceland", "ar-ps", "Paul Simon"),
+                navi_album("al-a-man", "Manhattan", "ar-man", "Manhattan"),
+            ],
+            [
+                ("al-a-jg-1", vec![navi_song("s-a-jg-1", "al-a-jg-1", "Love & War & the Sea in Between", "ar-jg", "Josh Garrels", "White Owl")]),
+                ("al-a-jg-2", vec![navi_song("s-a-jg-2", "al-a-jg-2", "Jacaranda", "ar-jg", "Josh Garrels", "A Long Way")]),
+                ("al-a-ss-1", vec![navi_song("s-a-ss-1", "al-a-ss-1", "Psalms II", "ar-ss", "Shane & Shane", "Psalm 23")]),
+                ("al-a-jw-1", vec![navi_song("s-a-jw-1", "al-a-jw-1", "Star Wars", "ar-jw", "John Williams", "Main Title")]),
+                ("al-a-stand", vec![navi_song("s-a-stand", "al-a-stand", "Stand", "ar-stand", "Stand", "Track 1")]),
+                ("al-a-ps", vec![navi_song("s-a-ps", "al-a-ps", "Graceland", "ar-ps", "Paul Simon", "Graceland")]),
+                ("al-a-man", vec![navi_song("s-a-man", "al-a-man", "Manhattan", "ar-man", "Manhattan", "Manhattan")]),
+            ]
+            .into(),
+            [("Josh Garrels", vec![navi_song("s-a-jg-1", "al-a-jg-1", "Love & War & the Sea in Between", "ar-jg", "Josh Garrels", "White Owl")])].into(),
+        );
+        let two = navidrome_server(
+            vec![
+                navi_artist("fr-jg", "Josh Garrels", 2, Some("")),
+                navi_artist("fr-ss", "Shane & Shane", 1, None),
+                navi_artist("fr-soj", "Sojourn Music", 1, Some("")),
+                navi_artist("fr-jw", "John Williams", 1, Some("44444444-4444-4444-4444-444444444444")),
+                navi_artist("fr-va", "Various Artists", 1, Some("")),
+            ],
+            vec![
+                navi_album("al-b-jg-1", "Home", "fr-jg", "Josh Garrels"),
+                navi_album("al-b-jg-2", "Chrysaline", "fr-jg", "Josh Garrels"),
+                navi_album("al-b-ss-1", "The Worship Initiative", "fr-ss", "Shane & Shane"),
+                navi_album("al-b-soj-1", "Over the Grave", "fr-soj", "Sojourn Music"),
+                navi_album("al-b-jw-1", "Cavatina", "fr-jw", "John Williams"),
+                navi_album("al-b-va-1", "Hymns Compilation", "fr-va", "Various Artists"),
+            ],
+            [
+                ("al-b-jg-1", vec![navi_song("s-b-jg-1", "al-b-jg-1", "Home", "fr-jg", "Josh Garrels", "Home")]),
+                ("al-b-jg-2", vec![navi_song("s-b-jg-2", "al-b-jg-2", "Chrysaline", "fr-jg", "Josh Garrels", "Chrysaline")]),
+                ("al-b-ss-1", vec![navi_song("s-b-ss-1", "al-b-ss-1", "The Worship Initiative", "fr-ss", "Shane & Shane", "Come Behold")]),
+                ("al-b-soj-1", vec![navi_song("s-b-soj-1", "al-b-soj-1", "Over the Grave", "fr-soj", "Sojourn Music", "Over the Grave")]),
+                ("al-b-jw-1", vec![navi_song("s-b-jw-1", "al-b-jw-1", "Cavatina", "fr-jw", "John Williams", "Cavatina")]),
+                ("al-b-va-1", vec![navi_song("s-b-va-1", "al-b-va-1", "Hymns Compilation", "fr-jg", "Josh Garrels", "Amazing Grace")]),
+            ]
+            .into(),
+            [(
+                "Josh Garrels",
+                vec![
+                    navi_song("s-b-jg-1", "al-b-jg-1", "Home", "fr-jg", "Josh Garrels", "Home"),
+                    navi_song("s-b-jg-2", "al-b-jg-2", "Chrysaline", "fr-jg", "Josh Garrels", "Chrysaline"),
+                    navi_song("s-b-va-1", "al-b-va-1", "Hymns Compilation", "fr-jg", "Josh Garrels", "Amazing Grace"),
+                ],
+            )]
+            .into(),
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut h = Harness::builder().with_size(egui::vec2(1360.0, 960.0)).allow_missing_glyphs().build_ui_state(
+            |ui, app: &mut Option<OndApp>| {
+                if let Some(app) = app {
+                    app.main_ui(ui);
+                }
+            },
+            None,
+        );
+
+        let ctx = h.ctx.clone();
+        let mut app = fixture::populated(&ctx, dir.path());
+        app.data.clear();
+        app.player = Default::default();
+        app.favorites = Default::default();
+        app.session = Default::default();
+        let mut e1 = SourceEntry::subsonic(account(1), one.base(), "me");
+        e1.name = Some("MyNavi".into());
+        let mut e2 = SourceEntry::subsonic(account(2), two.base(), "friend");
+        e2.name = Some("Friend".into());
+        let entries = [e1, e2];
+        app.prefs.edit(|s| {
+            s.sources = entries.to_vec();
+            s.scope = Scope::all();
+        });
+        let mut stores_by_account = std::collections::HashMap::new();
+        for entry in entries {
+            let a = entry.id;
+            let source: Src = Arc::new(SubsonicSource::new(a, subsonic::Client::new(&entry.server, subsonic::Credentials::new("me", "p")).unwrap()));
+            let stores = crate::storage::Stores::in_memory().unwrap();
+            let bridge = app.bridge.fork_source(a, stores.library.clone());
+            bridge.configure_storage(dir.path().to_owned(), dir.path().join("art"), Some(a), &stores.analyses);
+            let mut settings = Settings { sources: app.prefs.snapshot().sources, ..Default::default() };
+            settings.make_primary(a);
+            app.session
+                .accounts
+                .insert(a, super::super::session::SourceSession { source: Some(source.clone()), online: true, settings: Some(settings), ..Default::default() });
+            app.multi.bridges.insert(a, bridge.clone());
+            stores_by_account.insert(a, stores);
+            bridge.sync_source(&source);
+        }
+        app.session.focus = Some(account(1));
+        pump(&mut app, |a| a.data.albums.len() == 13 && a.data.tracks.all.len() == 13 && !a.data.artists.is_empty());
+        *h.state_mut() = Some(app);
+
+        let drain = |h: &mut Harness<'_, Option<OndApp>>| {
+            for _ in 0..4 {
+                while let Ok(msg) = h.state_mut().as_mut().unwrap().inbox.try_recv() {
+                    h.state_mut().as_mut().unwrap().handle(msg);
+                }
+                h.state_mut().as_mut().unwrap().after_messages();
+                h.run_steps(1);
+            }
+        };
+
+        let visit_album_then_click_artist = |h: &mut Harness<'_, Option<OndApp>>, album_key: String, artist: &str| {
+            {
+                let app = h.state_mut().as_mut().unwrap();
+                app.apply(Action::Go(Route::Album(album_key)));
+            }
+            drain(h);
+            let play_top = h.get_by_label("Play").rect().top();
+            h.query_all_by_label(artist)
+                .filter(|n| n.rect().bottom() < play_top)
+                .max_by(|a, b| a.rect().top().total_cmp(&b.rect().top()))
+                .unwrap_or_else(|| panic!("no album header artist link for {artist}"))
+                .click();
+            drain(h);
+            let deadline = Deadline::new();
+            while !h.state().as_ref().unwrap().data.credited.contains_key(artist) {
+                assert!(!deadline.passed(), "credited lookup for {artist} did not settle");
+                if let Ok(msg) = h.state_mut().as_mut().unwrap().inbox.recv_timeout(Duration::from_millis(10)) {
+                    h.state_mut().as_mut().unwrap().handle(msg);
+                    h.state_mut().as_mut().unwrap().after_messages();
+                    h.run_steps(1);
+                }
+            }
+            drain(h);
+        };
+
+        // Bug 1 + Bug 2: Friend album -> click "Josh Garrels" -> merged 4 albums under MyNavi & Friend,
+        // none of MyNavi's unrelated albums, and "Home"/"Chrysaline" NOT under "Also credited on".
+        visit_album_then_click_artist(&mut h, key(account(2), "al-b-jg-1"), "Josh Garrels");
+        h.get_by_label("4 albums");
+        h.get_by_label("MyNavi");
+        h.get_by_label("Friend");
+        h.get_by_label_contains("Love & War & the Sea in Between by Josh Garrels");
+        h.get_by_label_contains("Jacaranda by Josh Garrels");
+        assert_eq!(h.query_all_by_label_contains("Home by Josh Garrels").count(), 1);
+        assert_eq!(h.query_all_by_label_contains("Chrysaline by Josh Garrels").count(), 1);
+        assert!(h.query_by_label_contains("Stand").is_none());
+        assert!(h.query_by_label_contains("Paul Simon").is_none());
+        assert!(h.query_by_label_contains("Manhattan").is_none());
+        // Genuine guest track credit still renders under "Also credited on", while own albums do not.
+        h.get_by_label("Also credited on");
+        h.get_by_label_contains("Hymns Compilation by Various Artists");
+
+        // Same artist from MyNavi album -> same merged view, Friend's copies NOT relegated to "Also credited on".
+        visit_album_then_click_artist(&mut h, key(account(1), "al-a-jg-1"), "Josh Garrels");
+        h.get_by_label("4 albums");
+        h.get_by_label("MyNavi");
+        h.get_by_label("Friend");
+        assert_eq!(h.query_all_by_label_contains("Home by Josh Garrels").count(), 1);
+        assert_eq!(h.query_all_by_label_contains("Chrysaline by Josh Garrels").count(), 1);
+        assert!(h.query_by_label_contains("Stand").is_none());
+
+        // Shane & Shane (MyNavi has MBID, Friend omitted musicBrainzId) from Friend album -> merged 2 albums, no "Also credited on".
+        visit_album_then_click_artist(&mut h, key(account(2), "al-b-ss-1"), "Shane & Shane");
+        h.get_by_label("2 albums");
+        h.get_by_label("MyNavi");
+        h.get_by_label("Friend");
+        assert_eq!(h.query_all_by_label_contains("Psalms II by Shane & Shane").count(), 1);
+        assert_eq!(h.query_all_by_label_contains("The Worship Initiative by Shane & Shane").count(), 1);
+        assert!(h.query_by_label_contains("Stand").is_none());
+        assert!(h.query_by_label("Also credited on").is_none());
+
+        // Sojourn Music (Friend only, empty MBID) -> 1 album, no MyNavi albums!
+        visit_album_then_click_artist(&mut h, key(account(2), "al-b-soj-1"), "Sojourn Music");
+        h.get_by_label("1 album");
+        assert_eq!(h.query_all_by_label_contains("Over the Grave by Sojourn Music").count(), 1);
+        assert!(h.query_by_label("MyNavi").is_none());
+        assert!(h.query_by_label_contains("Stand").is_none());
+        assert!(h.query_by_label_contains("Paul Simon").is_none());
+        assert!(h.query_by_label_contains("Manhattan").is_none());
+
+        // Distinct-MBID homonyms never merge across servers.
+        visit_album_then_click_artist(&mut h, key(account(2), "al-b-jw-1"), "John Williams");
+        h.get_by_label("1 album");
+        assert_eq!(h.query_all_by_label_contains("Cavatina by John Williams").count(), 1);
+        assert_eq!(h.query_all_by_label_contains("Star Wars by John Williams").count(), 0);
+        assert!(h.query_by_label("Also credited on").is_none());
+
+        visit_album_then_click_artist(&mut h, key(account(1), "al-a-jw-1"), "John Williams");
+        h.get_by_label("1 album");
+        assert_eq!(h.query_all_by_label_contains("Star Wars by John Williams").count(), 1);
+        assert_eq!(h.query_all_by_label_contains("Cavatina by John Williams").count(), 0);
+        assert!(h.query_by_label("Also credited on").is_none());
+
+        // Command palette Route::Artist also yields the merged page.
+        {
+            let ctx = h.ctx.clone();
+            let app = h.state_mut().as_mut().unwrap();
+            app.rebuild_search();
+            let enter = egui::Event::Key { key: egui::Key::Enter, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE };
+            type_in_palette(&ctx, app, "Josh Garrels");
+            frame(&ctx, app, vec![enter]);
+        }
+        drain(&mut h);
+        h.get_by_label("4 albums");
+        h.get_by_label("MyNavi");
+        h.get_by_label("Friend");
+        assert!(h.query_by_label_contains("Stand").is_none());
+
+        // Reloading from saved stores whose artist_mbids_v1 already contains stale "" entries also sanitizes them.
+        stores_by_account[&account(1)]
+            .library
+            .save(
+                "artist_mbids_v1",
+                &std::collections::BTreeMap::from([
+                    ("ar-jg".to_owned(), "11111111-1111-1111-1111-111111111111".to_owned()),
+                    ("ar-stand".to_owned(), "".to_owned()),
+                    ("ar-ps".to_owned(), "".to_owned()),
+                ]),
+            )
+            .unwrap();
+        stores_by_account[&account(2)]
+            .library
+            .save("artist_mbids_v1", &std::collections::BTreeMap::from([("fr-jg".to_owned(), "".to_owned()), ("fr-soj".to_owned(), "".to_owned())]))
+            .unwrap();
+        for a in [account(1), account(2)] {
+            h.state_mut().as_mut().unwrap().multi.bridges[&a].load_local(None);
+        }
+        drain(&mut h);
+        {
+            let app = h.state().as_ref().unwrap();
+            let jg = app.data.merged_artist(Some(&key(account(2), "fr-jg")), "Josh Garrels").unwrap();
+            assert_eq!(jg.albums.values().map(|v| v.len()).sum::<usize>(), 4);
+            let soj = app.data.merged_artist(Some(&key(account(2), "fr-soj")), "Sojourn Music").unwrap();
+            assert_eq!(soj.albums.values().map(|v| v.len()).sum::<usize>(), 1);
+        }
+
+        *h.state_mut() = None;
+    }
 }

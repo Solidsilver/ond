@@ -107,8 +107,8 @@ pub struct UiState {
     /// clicking its column's header in the list).
     pub sort: AlbumSort,
     pub sort_desc: bool,
-    /// The album list for the current view, cached by (route, sort, data version).
-    pub grid: crate::memo::Memo<(Route, AlbumSort, bool, u64), Vec<usize>>,
+    /// The album list for the current view, cached by (route, sort, data version, artists version).
+    pub grid: crate::memo::Memo<(Route, AlbumSort, bool, u64, u64), Vec<usize>>,
     /// Where each letter starts in that list, for the alphabet rail.
     pub grid_marks: crate::memo::Memo<(Route, AlbumSort, bool, u64), super::alpha::Marks>,
     /// How Artists is sorted, the order that gives (for the artists' list
