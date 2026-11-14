@@ -2,6 +2,9 @@
 //! changes or the folder moves), what's kept and waiting to be kept, and the
 //! messages and actions about them.
 
+mod projection;
+pub(super) use projection::DownloadView;
+
 use super::{Action, OndApp, Session};
 use crate::bridge::{Bridge, ListKey, OfflineMsg};
 use crate::prefs::Prefs;
@@ -425,13 +428,69 @@ impl OndApp {
     pub(super) fn apply_offline(&mut self, action: OfflineAction) {
         if !self.multi.bridges.is_empty() {
             match &action {
+                OfflineAction::Pause(_) | OfflineAction::Retry | OfflineAction::SetLimit(_) if !self.data.album_copies.is_empty() => {
+                    let accounts: Vec<_> =
+                        self.session.accounts.keys().copied().filter(|a| self.session.scope.includes(*a) && self.downloads_for(*a).is_some()).collect();
+                    for account in accounts {
+                        let own = match &action {
+                            OfflineAction::Pause(on) => OfflineAction::Pause(*on),
+                            OfflineAction::SetLimit(limit) => OfflineAction::SetLimit(*limit),
+                            _ => OfflineAction::Retry,
+                        };
+                        self.with_source(account, |app| app.apply_offline_for_source(own));
+                    }
+                    return;
+                }
+                OfflineAction::Unpin(Pin::Album(id)) if self.data.copies_of_album(id).len() > 1 => {
+                    return self.apply_offline(OfflineAction::Keep(Keep::Album(id.clone()), false));
+                }
+                OfflineAction::Unpin(Pin::Track(id))
+                    if self.data.copies_of_track(id).len() > 1
+                        || self.data.track_copy(id).is_some_and(|t| self.data.copies_of_album(&t.album_id).len() > 1) =>
+                {
+                    if let Some(track) = self.data.track_copy(id).cloned() {
+                        self.apply_offline(OfflineAction::Keep(Keep::Tracks(vec![track]), false));
+                    }
+                    return;
+                }
+                OfflineAction::Keep(Keep::Album(id), on) if self.data.copies_of_album(id).len() > 1 => {
+                    let tracks = self.data.tracks.album(self.data.album_lead(id)).map(|s| s.to_vec()).unwrap_or_default();
+                    let mut groups = std::collections::BTreeMap::<AccountId, Vec<Track>>::new();
+                    for track in tracks {
+                        let keys = if *on {
+                            self.data.preferred_track(&track.id, self.prefs_now().prefer_copy).into_iter().collect()
+                        } else {
+                            self.data.copies_of_track(&track.id)
+                        };
+                        for key in keys {
+                            if let Some(track) = self.data.track_copy(&key.to_string()) {
+                                groups.entry(key.account).or_default().push(track.clone());
+                            }
+                        }
+                    }
+                    for (account, tracks) in groups {
+                        self.with_source(account, |app| app.apply_offline_for_source(OfflineAction::Keep(Keep::Tracks(tracks), *on)));
+                    }
+                    if !on {
+                        for album in self.data.copies_of_album(id) {
+                            self.with_source(album.account, |app| app.apply_offline_for_source(OfflineAction::Unpin(Pin::Album(album.to_string()))));
+                        }
+                    }
+                    return;
+                }
                 OfflineAction::Keep(Keep::Tracks(tracks), on) => {
                     let mut groups = std::collections::BTreeMap::<AccountId, Vec<Track>>::new();
                     for track in tracks {
-                        if let Some(key) = self.session.key(&track.id)
-                            && self.session.get(key.account).is_some_and(|s| s.source_caps().downloads)
-                        {
-                            groups.entry(key.account).or_default().push(track.clone());
+                        let copies = if *on {
+                            self.data.preferred_track(&track.id, self.prefs_now().prefer_copy).into_iter().collect()
+                        } else {
+                            self.data.copies_of_track(&track.id)
+                        };
+                        for key in copies {
+                            if self.session.get(key.account).is_some_and(|s| s.source_caps().downloads) {
+                                let copy = self.data.track_copy(&key.to_string()).unwrap_or(track).clone();
+                                groups.entry(key.account).or_default().push(copy);
+                            }
                         }
                     }
                     for (account, tracks) in groups {
@@ -659,7 +718,12 @@ impl OndApp {
                             .collect(),
                     );
                 } else {
-                    store.unpin_many(&tracks.iter().filter_map(|t| adapter.pin(&crate::source::identity::key(account, &t.id))).collect::<Vec<_>>());
+                    let ids: Vec<_> = tracks.iter().map(|t| crate::source::identity::key(account, &t.id).to_string()).collect();
+                    if tracks.iter().any(|t| self.data.copies_of_track(&t.id).len() > 1 || self.data.copies_of_album(&t.album_id).len() > 1) {
+                        store.unpin_tracks(&ids);
+                    } else {
+                        store.unpin_many(&tracks.iter().filter_map(|t| adapter.pin(&crate::source::identity::key(account, &t.id))).collect::<Vec<_>>());
+                    }
                 }
                 self.downloads.refresh();
                 return;

@@ -9,6 +9,21 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 impl Data {
+    /// Stable preference order, shared by playback, ratings and downloads.
+    pub fn preferred_tracks(&self, id: &str, prefer: crate::settings::PreferCopy) -> Vec<ItemKey> {
+        let mut keys = self.copies_of_track(id);
+        if prefer == crate::settings::PreferCopy::BestQuality {
+            keys.sort_by_key(|key| {
+                let format = self.copy_format(&key.to_string());
+                std::cmp::Reverse((format.as_ref().is_some_and(|f| f.lossless), format.and_then(|f| f.bitrate_kbps).unwrap_or(0)))
+            });
+        }
+        keys
+    }
+
+    pub fn preferred_track(&self, id: &str, prefer: crate::settings::PreferCopy) -> Option<ItemKey> {
+        self.preferred_tracks(id, prefer).into_iter().next()
+    }
     /// Every member, lead first in settings order; also works for singletons.
     pub fn copies_of_album(&self, id: &str) -> Vec<ItemKey> {
         let lead = self.album_lead(id);

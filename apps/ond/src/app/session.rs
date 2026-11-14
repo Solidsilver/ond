@@ -408,6 +408,7 @@ impl OndApp {
         self.favorites = Favorites::default();
         self.lyrics.clear();
         self.song_stats.clear();
+        self.multi.song_stats.clear();
         self.ui.nav = Nav::default();
         self.cache.clear();
     }
@@ -429,6 +430,7 @@ impl OndApp {
     pub(super) fn forget_in_flight(&mut self) {
         self.lyrics.retain(|_, f| *f != crate::lyrics::Fetch::Loading);
         self.song_stats.retain(|_, s| s.is_some());
+        self.multi.song_stats.retain(|_, s| s.is_some());
     }
 
     /// The server's gone: browse what's stored, play what's downloaded.
@@ -479,6 +481,7 @@ impl OndApp {
         // in flight now delivers nothing, so its `Loading` would stay for good.
         self.lyrics.clear();
         self.song_stats.clear();
+        self.multi.song_stats.clear();
         self.forget_waiting();
         self.bridge.cancel_sync();
         // Reconnect loops and connects in flight stop; anything they still

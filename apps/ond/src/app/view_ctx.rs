@@ -27,6 +27,7 @@ pub struct ViewCtx<'a> {
     pub engine: &'a EngineHandle,
     pub favorites: &'a Favorites,
     pub downloads: &'a Downloads,
+    focused_downloads: &'a Downloads,
     pub source_downloads: &'a std::collections::BTreeMap<accounts::AccountId, Downloads>,
     pub cache: &'a streamcache::StreamCache,
     pub analysis: &'a Analysis,
@@ -71,15 +72,36 @@ pub fn hash_str(s: &str) -> u64 {
 
 impl<'a> ViewCtx<'a> {
     fn downloads_for(&self, account: accounts::AccountId) -> Option<&'a Downloads> {
-        if self.downloads.owner == Some(account) { Some(self.downloads) } else { self.source_downloads.get(&account) }
+        if self.focused_downloads.owner == Some(account) { Some(self.focused_downloads) } else { self.source_downloads.get(&account) }
     }
 
     pub fn download_state(&self, track: &Track) -> Option<&offline::TrackState> {
+        let copies = self.data.copies_of_track(&track.id);
+        if copies.len() > 1 {
+            return copies.iter().filter_map(|key| self.downloads_for(key.account)?.tracks().track(key)).max_by_key(|s| match s {
+                offline::TrackState::Done { .. } => 3,
+                offline::TrackState::Downloading { .. } => 2,
+                offline::TrackState::Queued => 1,
+                offline::TrackState::Failed { .. } => 0,
+            });
+        }
         let key = self.session.key(&track.id)?;
         self.downloads_for(key.account)?.tracks().track(&key)
     }
 
     pub fn track_pin(&self, track: &Track) -> Option<offline::Pin> {
+        if self.data.copies_of_track(&track.id).len() > 1 || self.data.copies_of_album(&track.album_id).len() > 1 {
+            let lead = self.data.album_lead(&track.album_id);
+            if self.download_state(track).is_some() && self.downloads.album_pin(lead).is_some() {
+                return Some(offline::Pin::Album(lead.to_owned()));
+            }
+        }
+        for key in self.data.copies_of_track(&track.id) {
+            let pin = offline::Pin::Track(key.to_string());
+            if self.downloads.snap.pin(&pin).is_some() {
+                return Some(pin);
+            }
+        }
         let key = self.session.key(&track.id)?;
         self.downloads_for(key.account)?.tracks().pin(&key)
     }
@@ -119,6 +141,10 @@ impl<'a> ViewCtx<'a> {
 
     /// The album's download, when it's kept offline (see [`Downloads::album_pin`]).
     pub fn album_pin(&self, id: &str) -> Option<&'a offline::PinSummary> {
+        let lead = self.data.album_lead(id);
+        if self.data.copies_of_album(id).len() > 1 {
+            return self.downloads.album_pin(lead);
+        }
         let downloads = crate::source::identity::account(id).and_then(|a| self.downloads_for(a)).unwrap_or(self.downloads);
         downloads.album_pin(id)
     }
@@ -133,12 +159,14 @@ impl OndApp {
     /// Lends the parts a view works with.
     pub(super) fn view(&mut self) -> ViewCtx<'_> {
         self.downloads.index_album_pins();
+        self.project_downloads();
         ViewCtx {
             data: &self.data,
             player: &self.player,
             engine: &self.engine,
             favorites: &self.favorites,
-            downloads: &self.downloads,
+            downloads: self.multi.download_view.downloads.as_ref().unwrap_or(&self.downloads),
+            focused_downloads: &self.downloads,
             source_downloads: &self.multi.downloads,
             cache: &self.cache,
             analysis: &self.analysis,

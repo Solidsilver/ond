@@ -231,7 +231,10 @@ impl OndApp {
                 self.prefs.edit(|s| s.combine_copies = on);
                 self.project_sources();
             }
-            PrefsAction::PreferCopy(prefer) => self.prefs.edit(|s| s.prefer_copy = prefer),
+            PrefsAction::PreferCopy(prefer) => {
+                self.prefs.edit(|s| s.prefer_copy = prefer);
+                self.favorites.combine(&self.data, prefer);
+            }
             PrefsAction::AlbumView(v) => self.prefs.edit(|s| s.album_view = v),
             PrefsAction::ArtistView(v) => self.prefs.edit(|s| s.artist_view = v),
             PrefsAction::Scrobble(on) => {

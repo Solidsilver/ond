@@ -409,3 +409,62 @@ The Transport/Sources/Note boundary, session-scoped bridge work and audio
 callback are unchanged. No view drawing code or snapshot scene changes are
 part of this stage. Shared stars, ratings, play counts, downloads across
 copies and Keep apart remain stage 3.
+
+## Ond backend handoff (milestone 5, stage 3)
+
+- `Action::ToggleStar` now applies one desired state to every current song or
+  album copy. `Favorites::is_on` derives the visible heart from any copy;
+  `Favorites.view` maps stars onto union rows and lists each song and album
+  once. Source snapshots and optimistic changes retain their own raw values,
+  sequence protection and rollback. Each source's scoped bridge writes to
+  that server, or to Ond's existing stars/ratings tables when the source
+  lacks the capability. A refusal restores that copy's own previous value.
+- `Favorites::rating` reads the preferred song copy. The preference order is
+  shared with playback through `Data::preferred_tracks` / `preferred_track`:
+  source order, or lossless then descending bitrate with stable source-order
+  ties. Ratings and downloads use that order independently of temporary
+  reachability; playback still filters for playable copies. `Action::Rate`
+  writes every song copy. Changing `prefer_copy`, scope, source order or
+  combination immediately rebuilds the derived metadata lookups.
+- `Action::NeedSongStats` asks each copy once, through its scoped bridge.
+  `song_stats` exposes the summed known play counts under every member key
+  and the latest reported last-played time. Raw answers remain separate so
+  disabling combination or changing scope restores each source's count.
+  Adding copies to an already requested song fetches the missing answers.
+  Counts are currently shown only in Info; no stored track layout changes.
+  Scrobbling and now-playing reporting still use the member that played.
+- Download actions select the preferred real member of each combined song.
+  A combined album downloads its union using individual song pins, including
+  songs absent from the lead source. Those exact selections survive source
+  syncs; changing preference does not delete already pinned copies. Removing
+  a combined song removes its copies from all pins that hold them, preserving
+  other songs. `OfflineStore::unpin_tracks` performs that explicit removal
+  through the existing saver/deleter; unknown files are never inferred from
+  the combined projection.
+- `ViewCtx::download_state`, `track_pin` and `album_pin` expose derived download
+  state. Any downloaded copy lights a song. A combined album is complete only
+  when every union song has a downloaded copy, including a mixture across
+  accounts. The versioned, read-only download projection supplied to views
+  lists that completed album once in Offline; unfinished individual song
+  pins retain their progress rows. Real stores and file ownership stay per
+  source. With combination off, all these actions and lookups retain their
+  milestone 4 behavior.
+- The UI pass should add **Keep apart** to combined album menus, dispatching
+  `Action::KeepApart(album_lead)`, and **Combine again** on either separated
+  member, dispatching `Action::CombineAgain(album_key)`. Both arguments use
+  canonical account-qualified album keys. Keep apart records all pairs in
+  the current group; Combine again clears only pairs involving the supplied
+  member, including absent sources. `Data.apart_pairs` exposes the choices
+  for menu availability or an optional separated-copy indicator.
+- Exclusions live in the new `album_apart_v1` table in `ond.redb`, with a
+  frozen `ApartV1` record and schema v1 → v2 migration. Existing stored rows
+  are unchanged. The matcher checks every pair in a candidate group, so an
+  A/B exclusion cannot be bridged by C, while C remains free to combine with
+  either compatible group. Serialized background writes publish the saved
+  choices, rebuild the projection and advance search/memo versions. Startup
+  reloads them before source projection; syncs never replace them.
+
+This pass adds no menu items, settings rows, view drawing or snapshot scenes.
+The UI pass can keep the existing star, rating and download lookups, add the
+album menu actions above, and optionally identify the preferred/downloaded
+member using the real keys already exposed by the copy accessors.

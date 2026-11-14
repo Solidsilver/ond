@@ -551,6 +551,17 @@ impl OfflineStore {
         self.inner.commit(st, gone);
     }
 
+    /// Removes explicitly named songs from every album, playlist and song pin.
+    /// Only files proven to belong to these removed references are tidied.
+    pub fn unpin_tracks(&self, ids: &[String]) {
+        if ids.is_empty() {
+            return;
+        }
+        let mut st = self.inner.lock();
+        let gone = st.pins.remove_tracks(&ids.iter().map(String::as_str).collect());
+        self.inner.commit(st, gone);
+    }
+
     pub fn is_pinned(&self, pin: &Pin) -> bool {
         self.inner.lock().pins.is_pinned(pin)
     }

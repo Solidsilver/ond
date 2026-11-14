@@ -29,6 +29,8 @@ pub(super) struct AllSources {
     scope: Scope,
     combine_copies: bool,
     pub apart_pairs: crate::store::ApartPairs,
+    pub song_stats: HashMap<String, Option<super::SongStats>>,
+    pub download_view: super::pins::DownloadView,
 }
 
 #[derive(Debug, Clone)]
@@ -328,6 +330,18 @@ impl OndApp {
         self.multi.scope = scope.clone();
         self.multi.combine_copies = combine;
         self.favorites.set_scope(scope);
+        self.favorites.combine(&self.data, settings.prefer_copy);
+        self.project_song_stats();
+        let requested: Vec<_> = self
+            .data
+            .track_copies
+            .iter()
+            .filter(|(_, keys)| keys.iter().any(|key| self.multi.song_stats.contains_key(&key.to_string())))
+            .map(|(lead, _)| lead.clone())
+            .collect();
+        for id in requested {
+            self.need_song_stats(id);
+        }
         self.search.stale = true;
         // Advance the generation now so an earlier build can't install over the
         // new scope and `is_current()` flips false until the rebuild lands.
@@ -381,6 +395,42 @@ impl OndApp {
         self.bridge.separate_copies(pairs, None);
     }
 
+    pub(super) fn need_song_stats(&mut self, id: String) {
+        let copies = self.data.copies_of_track(&id);
+        let ids = if copies.is_empty() { vec![id] } else { copies.iter().map(ToString::to_string).collect() };
+        for id in ids {
+            if self.multi.song_stats.contains_key(&id) {
+                continue;
+            }
+            if let Some(account) = identity::account(&id).filter(|a| self.multi.bridges.contains_key(a)) {
+                self.with_source(account, |app| {
+                    if app.session.source.is_some() {
+                        app.multi.song_stats.insert(id.clone(), None);
+                        app.bridge.fetch_song_stats(app.session.source.clone(), id);
+                    }
+                });
+            } else if self.session.source.is_some() {
+                self.multi.song_stats.insert(id.clone(), None);
+                self.bridge.fetch_song_stats(self.session.source.clone(), id);
+            }
+        }
+        self.project_song_stats();
+    }
+
+    pub(super) fn project_song_stats(&mut self) {
+        self.song_stats = self.multi.song_stats.clone();
+        for members in self.data.track_copies.values() {
+            let stats: Vec<_> = members.iter().filter_map(|k| self.multi.song_stats.get(&k.to_string()).and_then(Option::as_ref)).collect();
+            let plays = stats.iter().filter_map(|s| s.plays).reduce(u64::saturating_add);
+            let last_played = stats.iter().filter_map(|s| s.last_played.as_ref()).max_by_key(|s| chrono::DateTime::parse_from_rfc3339(s).ok()).cloned();
+            if !stats.is_empty() {
+                for key in members {
+                    self.song_stats.insert(key.to_string(), Some(super::SongStats { plays, last_played: last_played.clone() }));
+                }
+            }
+        }
+    }
+
     fn scope_section_to_top(&self, route: &Route) {
         match route {
             Route::Albums => {
@@ -428,6 +478,7 @@ impl OndApp {
             self.favorites = Default::default();
             self.lyrics.clear();
             self.song_stats.clear();
+            self.multi.song_stats.clear();
             let settings = self.session.settings.clone().unwrap_or_default();
             self.login =
                 Some(super::session::LoginForm { server: settings.server().to_owned(), username: settings.username().to_owned(), ..Default::default() });
@@ -465,6 +516,7 @@ impl OndApp {
         self.favorites.remove_account(account);
         self.lyrics.retain(|id, _| identity::account(id) != Some(account));
         self.song_stats.retain(|id, _| identity::account(id) != Some(account));
+        self.multi.song_stats.retain(|id, _| identity::account(id) != Some(account));
         self.art.remove_source(account);
         self.now_playing.remove_source(account);
         if self.multi.pending_playlist.as_ref().is_some_and(|p| p.source.account == account || p.entries.iter().any(|k| k.account == account)) {
@@ -565,6 +617,7 @@ impl OndApp {
     pub(super) fn forget_source_requests(&mut self, account: AccountId) {
         self.lyrics.retain(|id, fetch| identity::account(id) != Some(account) || *fetch != crate::lyrics::Fetch::Loading);
         self.song_stats.retain(|id, stats| identity::account(id) != Some(account) || stats.is_some());
+        self.multi.song_stats.retain(|id, stats| identity::account(id) != Some(account) || stats.is_some());
         self.pending.retain(|p| !super::data::belongs_to(&p.key, account));
         self.downloads.pending_pins.retain(|(key, _)| !super::data::belongs_to(key, account));
     }
@@ -610,6 +663,7 @@ pub struct PendingMixedPlaylist {
 
 #[cfg(test)]
 mod tests {
+    mod stage3;
     use super::*;
     use crate::app::{PlaylistAction, fixture};
     use crate::bridge::ListKey;

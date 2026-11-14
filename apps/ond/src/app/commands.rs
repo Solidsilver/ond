@@ -157,13 +157,35 @@ impl OndApp {
 
     /// Flips a heart now and tells the server (or Ond's store); a refusal puts it back.
     pub(super) fn toggle_star(&mut self, kind: StarKind, id: String, track: Option<Track>, name: Option<String>) {
-        let (on, seq) = self.favorites.toggle(kind, &id, track.as_ref(), name.as_deref());
-        self.bridge.set_starred(self.session.source.clone(), kind, id, name, on, seq);
+        let on = !self.favorites.is_on(kind, &id);
+        let copies = match kind {
+            StarKind::Song => self.data.copies_of_track(&id),
+            StarKind::Album => self.data.copies_of_album(&id),
+            StarKind::Artist => Vec::new(),
+        };
+        let ids = if copies.is_empty() { vec![id] } else { copies.iter().map(ToString::to_string).collect() };
+        for id in ids {
+            let track = self.data.track_copy(&id).cloned().or_else(|| track.clone());
+            let seq = self.favorites.set_pending(kind, &id, on, track.as_ref(), name.as_deref());
+            if let Some(account) = crate::source::identity::account(&id).filter(|a| self.multi.bridges.contains_key(a)) {
+                self.with_source(account, |app| app.bridge.set_starred(app.session.source.clone(), kind, id, name.clone(), on, seq));
+            } else {
+                self.bridge.set_starred(self.session.source.clone(), kind, id, name.clone(), on, seq);
+            }
+        }
     }
 
     pub(super) fn rate(&mut self, id: String, rating: u8) {
-        let (previous, seq) = self.favorites.rate(&id, rating);
-        self.bridge.set_rating(self.session.source.clone(), id, rating, previous, seq);
+        let copies = self.data.copies_of_track(&id);
+        let ids = if copies.is_empty() { vec![id] } else { copies.iter().map(ToString::to_string).collect() };
+        for id in ids {
+            let (previous, seq) = self.favorites.rate(&id, rating);
+            if let Some(account) = crate::source::identity::account(&id).filter(|a| self.multi.bridges.contains_key(a)) {
+                self.with_source(account, |app| app.bridge.set_rating(app.session.source.clone(), id, rating, previous, seq));
+            } else {
+                self.bridge.set_rating(self.session.source.clone(), id, rating, previous, seq);
+            }
+        }
     }
 
     pub(super) fn star_done(&mut self, kind: StarKind, id: String, on: bool, seq: u64, error: Option<Failure>) {

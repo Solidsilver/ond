@@ -267,6 +267,7 @@ impl OndApp {
         self.favorites = Default::default();
         self.lyrics.clear();
         self.song_stats.clear();
+        self.multi.song_stats.clear();
         self.forget_waiting();
         self.bridge.end_session();
         self.analysis.runner.set_server(None);

@@ -124,6 +124,16 @@ impl Pins {
         self.gc()
     }
 
+    /// An explicit song removal applies to every pin that holds that song.
+    pub fn remove_tracks(&mut self, ids: &HashSet<&str>) -> Vec<String> {
+        self.pins.retain_mut(|pin| {
+            let before = pin.tracks.len();
+            pin.tracks.retain(|id| !ids.contains(id.as_str()));
+            before == pin.tracks.len() || !pin.tracks.is_empty()
+        });
+        self.gc()
+    }
+
     pub fn is_pinned(&self, pin: &Pin) -> bool {
         self.pins.iter().any(|p| &p.pin == pin)
     }

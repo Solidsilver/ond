@@ -107,16 +107,9 @@ impl player::Sources for AppSources<'_> {
 
     fn copies(&self, key: &TrackKey) -> Vec<(TrackKey, Track)> {
         let spelling = key.to_string();
-        let mut keys = self.data.copies_of_track(&spelling);
+        let keys = self.data.preferred_tracks(&spelling, self.prefer_copy);
         if keys.len() < 2 {
             return Vec::new();
-        }
-        if self.prefer_copy == crate::settings::PreferCopy::BestQuality {
-            // Stable sorting leaves equal formats in settings source order.
-            keys.sort_by_key(|key| {
-                let format = self.data.copy_format(&key.to_string());
-                std::cmp::Reverse((format.as_ref().is_some_and(|f| f.lossless), format.and_then(|f| f.bitrate_kbps).unwrap_or(0)))
-            });
         }
         keys.into_iter()
             .filter_map(|key| {

@@ -658,7 +658,8 @@ impl OndApp {
                 self.lyrics.insert(track_id, crate::lyrics::Fetch::Done(lyrics));
             }
             Msg::SongStats { track_id, stats } => {
-                self.song_stats.insert(track_id, stats);
+                self.multi.song_stats.insert(track_id, stats);
+                self.project_song_stats();
             }
             Msg::UserMeta { meta, tracks } => self.favorites.note(meta, &tracks),
             Msg::StarDone { kind, id, on, seq, error } => self.star_done(kind, id, on, seq, error),
@@ -854,12 +855,7 @@ impl OndApp {
                     self.bridge.fetch_lyrics(self.session.source.clone(), track.id.clone(), track.artist.clone(), track.title.clone());
                 }
             }
-            Action::NeedSongStats(id) => {
-                if !self.song_stats.contains_key(&id) && self.session.source.is_some() {
-                    self.song_stats.insert(id.clone(), None);
-                    self.bridge.fetch_song_stats(self.session.source.clone(), id);
-                }
-            }
+            Action::NeedSongStats(id) => self.need_song_stats(id),
             Action::SyncNow => {
                 if let Some(source) = self.session.live().cloned()
                     && (source.paged().is_some() || source.local().is_some())
