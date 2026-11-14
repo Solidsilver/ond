@@ -240,6 +240,10 @@ pub fn source_dots(ui: &Ui, center: Pos2, colors: &[SourceColor], ground: Color3
 }
 
 /// How wide [`source_dots`] draws `n` dots.
+pub fn source_dots_width(n: usize) -> f32 {
+    dots_width(n)
+}
+
 fn dots_width(n: usize) -> f32 {
     let n = n.clamp(1, MAX_DOTS);
     2.0 * DOT_R + (n - 1) as f32 * DOT_STEP
