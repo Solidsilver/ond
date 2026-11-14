@@ -114,19 +114,21 @@ impl TrackRow {
         self.two_lines_from(ui, x, width, title, sub, None);
     }
 
-    /// [`two_lines`](Self::two_lines), with the second led by the dot of
-    /// the source the song comes from, when there is one to show.
+    /// [`two_lines`](Self::two_lines), with the second followed by the dot
+    /// of the source the song comes from, when there is one to show.
     pub fn two_lines_from(&self, ui: &Ui, x: f32, width: f32, title: (&str, FontId, Color32), sub: (&str, FontId, Color32), dot: Option<SourceColor>) {
         let cy = self.cy();
         let g = elide(ui, title.0, title.1, title.2, width);
         ui.painter().galley(pos2(x, cy - g.size().y), g, title.2);
-        let lead = if dot.is_some() { shell::kit::DOT_LEAD } else { 0.0 };
-        let g = elide(ui, sub.0, sub.1, sub.2, width - lead);
-        let sub_x = match dot {
-            Some(color) => shell::kit::source_dot_lead(ui, x, cy + 1.0 + g.size().y / 2.0, color),
-            None => x,
-        };
-        ui.painter().galley(pos2(sub_x, cy + 1.0), g, sub.2);
+        match dot {
+            Some(color) => {
+                shell::kit::text_then_dots(ui, pos2(x, cy + 1.0), sub, width, &[color], ui.visuals().window_fill);
+            }
+            None => {
+                let g = elide(ui, sub.0, sub.1, sub.2, width);
+                ui.painter().galley(pos2(x, cy + 1.0), g, sub.2);
+            }
+        }
     }
 
     /// Text ending at `right`, centred on the row (the length).

@@ -259,17 +259,12 @@ impl ViewCtx<'_> {
     }
 
     /// The catalogue line: genres, year and labels as links, then how many
-    /// songs and how long.
+    /// songs and how long, then the source while sources are mixed.
     fn album_facts_line(&mut self, ui: &mut Ui, t: &Tokens, page: &AlbumHeader) {
         let album = page.album;
         ui.spacing_mut().item_spacing.x = 0.0;
         let small = FontId::proportional(12.0);
         let mut sep = separator(t, 12.0);
-        // Where it comes from leads, while sources are mixed.
-        if let Some(mark) = super::source_look::mark_of(self.session, &self.ui.prefs.sources, &album.id) {
-            sep(ui);
-            shell::kit::source_label(ui, mark.color, &mark.name, small.clone(), t.muted);
-        }
         for g in album.all_genres() {
             sep(ui);
             if link(ui, g, small.clone(), t.muted).clicked() {
@@ -291,6 +286,12 @@ impl ViewCtx<'_> {
         if !page.tracks.is_empty() {
             sep(ui);
             ui.label(egui::RichText::new(&page.facts.extent).size(12.0).color(t.muted));
+        }
+        // Where it comes from ends the line, while sources are mixed, so the
+        // line starts under the title as the artist does.
+        if let Some(mark) = self.source_mark(&album.id) {
+            sep(ui);
+            shell::kit::source_label(ui, mark.color, &mark.name, small, t.muted);
         }
     }
 
