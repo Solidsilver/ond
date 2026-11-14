@@ -449,7 +449,7 @@ impl Player {
                     self.paused = true;
                 }
             }
-            Event::Error { track_id: Some(id), message } if book.files.iter().any(|f| f.id == *id) => {
+            Event::Error { track_id: Some(id), message, .. } if book.files.iter().any(|f| f.id == *id) => {
                 if message.contains("http 401") && !self.refreshed {
                     self.refreshed = true;
                     notes.push(Note::Refresh);

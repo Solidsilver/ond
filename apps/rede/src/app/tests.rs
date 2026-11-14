@@ -431,7 +431,7 @@ fn queued_playback_results_from_a_signed_out_account_are_dropped() {
         }]),
     });
     assert!(app.positions.is_empty());
-    app.handle(Msg::Engine { session, event: audio::Event::Error { track_id: None, message: "old device".into() } });
+    app.handle(Msg::Engine { session, event: audio::Event::Error { kind: audio::ErrorKind::Other, track_id: None, message: "old device".into() } });
     assert!(app.ui.notice.is_none());
 }
 

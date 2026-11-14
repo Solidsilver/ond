@@ -341,6 +341,13 @@ impl OndApp {
                     let songs = if n == 1 { "1 song".to_owned() } else { format!("{n} songs") };
                     self.ui.toasts.note(format!("Cleared {songs} from the queue"), "Undo", Action::Queue(QueueEdit::UndoClear));
                 }
+                Note::ProbeSource(account) => {
+                    if self.multi.bridges.contains_key(&account) {
+                        self.with_source(account, |app| app.probe());
+                    } else if self.session.account() == Some(account) {
+                        self.probe();
+                    }
+                }
                 Note::Probe => {
                     if let Some(account) = self.player.queue.current.as_ref().map(|i| i.key.account).filter(|a| self.multi.bridges.contains_key(a)) {
                         self.with_source(account, |app| app.probe());

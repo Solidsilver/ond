@@ -280,6 +280,15 @@ pub enum Command {
     Decoding(Sender<Option<u64>>),
 }
 
+/// Whether another copy can repair a playback failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ErrorKind {
+    /// The file is missing, or its stream could not be fetched.
+    Unavailable,
+    /// Decode, output, permission and other failures of an available file.
+    Other,
+}
+
 #[derive(Debug, Clone)]
 pub enum Event {
     /// The output reached a track. `gapless` is true when it followed the previous
@@ -330,6 +339,7 @@ pub enum Event {
         position_secs: f64,
     },
     Error {
+        kind: ErrorKind,
         track_id: Option<String>,
         message: String,
     },
@@ -822,7 +832,7 @@ impl Engine {
                     }
                 }
                 Err(e) => {
-                    let _ = self.events.send(Event::Error { track_id: None, message: e.to_string() });
+                    let _ = self.events.send(Event::Error { kind: ErrorKind::Other, track_id: None, message: e.to_string() });
                 }
             },
             Command::DeviceModes(modes) => self.device_modes = modes,
@@ -1305,8 +1315,8 @@ impl Engine {
                     }
                     return;
                 }
-                DecoderMsg::Error { seq, track_id, message } => {
-                    let _ = self.events.send(Event::Error { track_id: Some(track_id), message });
+                DecoderMsg::Error { seq, track_id, kind, message } => {
+                    let _ = self.events.send(Event::Error { kind, track_id: Some(track_id), message });
                     // A later track failing lets the current one play out; anything else stops.
                     if self.ring.is_none() || seq <= self.out_seq {
                         self.stop();
@@ -1400,7 +1410,7 @@ impl Engine {
             }
             Err(e) => {
                 let track_id = self.current().map(|t| t.src.id.clone());
-                let _ = self.events.send(Event::Error { track_id, message: e.to_string() });
+                let _ = self.events.send(Event::Error { kind: ErrorKind::Other, track_id, message: e.to_string() });
                 self.stop();
                 false
             }

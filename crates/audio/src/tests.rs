@@ -1083,7 +1083,7 @@ fn a_seek_the_source_cant_serve_is_an_error_not_a_stuck_hold() {
     // Backwards on a forward-only source.
     engine.send(Command::Seek(Duration::ZERO));
     let seen = events_until(&engine, |e| matches!(e, Event::Error { .. }));
-    assert!(matches!(seen.last(), Some(Event::Error { track_id: Some(id), message }) if id == "a" && message.contains("seek")), "{seen:?}");
+    assert!(matches!(seen.last(), Some(Event::Error { track_id: Some(id), message, .. }) if id == "a" && message.contains("seek")), "{seen:?}");
     let deadline = Deadline::new();
     while engine.status.state() != PlayState::Stopped {
         assert!(!deadline.passed(), "still {:?}", engine.status.state());

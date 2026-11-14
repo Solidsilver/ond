@@ -77,6 +77,8 @@ pub enum Note {
     Cleared(usize),
     /// Playback failed: the server may have gone away.
     Probe,
+    /// A copy failed before another source was tried.
+    ProbeSource(AccountId),
     /// A queue item started playing (`restart`: the engine restarted it, e.g.
     /// after a device change; it isn't a new play).
     Started {
@@ -116,6 +118,10 @@ pub struct Player {
     /// one named next: where it plays from (a file, or the server's stream).
     pub playing_from: Option<TrackSource>,
     next_from: Option<TrackSource>,
+    /// Runtime only: a new start gets a fresh attempt, never a persisted key.
+    tried_copies: Vec<crate::source::TrackKey>,
+    /// A gapless prefetch can fail while the current song is still playing.
+    failed_next: Option<(u64, crate::source::TrackKey)>,
     /// What the last Clear took, for its Undo.
     cleared: Option<crate::queue::Cleared>,
 }
@@ -186,6 +192,8 @@ impl Player {
         self.held = false;
         self.playing_from = None;
         self.next_from = None;
+        self.tried_copies.clear();
+        self.failed_next = None;
     }
 
     /// The server answered, or is known to be away: a held item starts now
@@ -242,7 +250,20 @@ impl Player {
                     self.sent_next = None;
                 }
             }
-            audio::Event::Error { track_id, message } => {
+            audio::Event::Error { track_id, message, kind } => {
+                let current = self.queue.current.as_ref().filter(|c| track_id.as_deref() == Some(crate::source::stream_name(&c.key).as_ref()));
+                if *kind == audio::ErrorKind::Unavailable {
+                    if let Some(account) = current.filter(|c| self.started != Some(c.uid)).map(|c| c.key.account) {
+                        if self.retry_copy(cx) {
+                            cx.notes.push(Note::ProbeSource(account));
+                            return;
+                        }
+                    } else if let Some(next) = self.queue.peek_next().filter(|i| track_id.as_deref() == Some(crate::source::stream_name(&i.key).as_ref()))
+                        && !cx.sources.copies(&next.key).is_empty()
+                    {
+                        self.failed_next = Some((next.uid, next.key.clone()));
+                    }
+                }
                 self.pending_seek = None;
                 // The current track couldn't be opened (e.g. deleted on the
                 // server): carry on with the next rather than leave the queue
@@ -278,6 +299,10 @@ impl Player {
         self.skipped_failure = false;
         self.held = false;
         self.playing_from = None;
+        self.tried_copies.clear();
+        if let Some((_, key)) = self.failed_next.take().filter(|(uid, _)| self.queue.current.as_ref().is_some_and(|i| i.uid == *uid)) {
+            self.tried_copies.push(key);
+        }
         let mut skipped = 0;
         // With "repeat queue" the queue never runs out, so give up after one
         // full pass in which nothing could play.
@@ -294,13 +319,18 @@ impl Player {
             }
             let prev = self.queue.history.last().filter(|i| i.key.account == item.key.account).map(|i| &i.track);
             let next = self.queue.peek_next().filter(|i| i.key.account == item.key.account).map(|i| &i.track);
-            if let Some(src) = cx.sources.source(item, prev, next) {
+            let already_failed = self.tried_copies.contains(&item.key);
+            if !already_failed && let Some(src) = cx.sources.source(item, prev, next) {
                 cx.sources.announce(item);
                 self.playing_from = Some(src.clone());
                 cx.engine.send(Command::Play(src));
                 self.sync_next(cx);
                 break;
             }
+            if self.retry_copy(cx) {
+                break;
+            }
+            let item = self.queue.current.as_ref().expect("current item retained");
             if cx.sources.waiting_for(item) {
                 cx.engine.send(Command::Stop);
                 self.held = true;
@@ -312,6 +342,7 @@ impl Player {
                 break;
             }
             skipped += 1;
+            self.tried_copies.clear();
             if self.queue.advance().is_none() {
                 cx.engine.send(Command::Stop);
                 break;
@@ -321,6 +352,38 @@ impl Player {
             let text = if skipped == 1 { "Skipped 1 song that isn't downloaded".to_owned() } else { format!("Skipped {skipped} songs that aren't downloaded") };
             cx.notes.push(Note::Notice(text));
         }
+    }
+
+    /// Tries another real member of this song without advancing its queue slot.
+    fn retry_copy(&mut self, cx: &mut Ctx<'_>) -> bool {
+        let Some(current) = self.queue.current.as_ref() else { return false };
+        if !self.tried_copies.contains(&current.key) {
+            self.tried_copies.push(current.key.clone());
+        }
+        let mut item = current.clone();
+        for (key, track) in cx.sources.copies(&current.key) {
+            if self.tried_copies.contains(&key) {
+                continue;
+            }
+            self.tried_copies.push(key.clone());
+            item.key = key;
+            item.track = track;
+            let prev = self.queue.history.last().filter(|i| i.key.account == item.key.account).map(|i| &i.track);
+            let next = self.queue.peek_next().filter(|i| i.key.account == item.key.account).map(|i| &i.track);
+            if let Some(src) = cx.sources.source(&item, prev, next) {
+                cx.sources.announce(&item);
+                self.queue.current = Some(item);
+                self.pending_seek = None;
+                self.held = false;
+                self.playing_from = Some(src.clone());
+                self.sent_next = None;
+                self.next_from = None;
+                cx.engine.send(Command::Play(src));
+                self.sync_next(cx);
+                return true;
+            }
+        }
+        false
     }
 
     /// Tells the engine what follows the current track (prefetch + gapless), if
@@ -334,7 +397,9 @@ impl Player {
         let account = next.map(|i| i.key.account);
         let current = self.queue.current.as_ref().filter(|i| Some(i.key.account) == account).map(|i| &i.track);
         let after = self.queue.upcoming.get(1).filter(|i| Some(i.key.account) == account).map(|i| &i.track);
-        let source = next.and_then(|i| cx.sources.source(i, current, after));
+        let source = next
+            .filter(|i| self.failed_next.as_ref().is_none_or(|(uid, key)| *uid != i.uid || *key != i.key))
+            .and_then(|i| cx.sources.source(i, current, after));
         // By queue item, not track: the same song queued twice is two items.
         let sent = source.as_ref().map(|s| s.token);
         if sent != self.sent_next {
@@ -872,7 +937,7 @@ mod tests {
     fn engine_errors_become_an_error_and_a_probe() {
         let mut r = Rig::new();
         r.player.pending_seek = Some(3.0);
-        let ev = audio::Event::Error { track_id: None, message: "boom".into() };
+        let ev = audio::Event::Error { kind: audio::ErrorKind::Other, track_id: None, message: "boom".into() };
         r.run(|p, cx| p.handle_engine(&ev, cx));
         assert_eq!(r.notes, [Note::Error("boom".into()), Note::Probe]);
         assert_eq!(r.player.pending_seek, None);
@@ -994,7 +1059,7 @@ mod tests {
     }
 
     fn error(id: Option<&str>) -> audio::Event {
-        audio::Event::Error { track_id: id.map(|id| crate::test_tracks::key(id).to_string()), message: "not found".into() }
+        audio::Event::Error { kind: audio::ErrorKind::Unavailable, track_id: id.map(|id| crate::test_tracks::key(id).to_string()), message: "not found".into() }
     }
 
     #[test]

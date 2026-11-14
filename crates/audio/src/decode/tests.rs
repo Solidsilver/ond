@@ -809,6 +809,7 @@ fn speech_bench(ring: usize) -> Bench {
         seek_pending: Arc::default(),
         at_seq: Arc::default(),
         track_id: String::new(),
+        error_kind: crate::ErrorKind::Other,
         seek_rx,
         next: Arc::default(),
         caps: None,

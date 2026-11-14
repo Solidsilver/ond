@@ -197,7 +197,7 @@ fn a_failed_token_refresh_is_bounded_and_retries_at_the_book_position() {
     let now = Instant::now();
     player.load(opened(false), 1.0, &engine, now).unwrap();
     let id = player.book.as_ref().unwrap().files[1].id.clone();
-    let error = Event::Error { track_id: Some(id), message: "probe: io error: http 401 Unauthorized".into() };
+    let error = Event::Error { kind: audio::ErrorKind::Other, track_id: Some(id), message: "probe: io error: http 401 Unauthorized".into() };
     let mut notes = Vec::new();
     player.event(&error, &engine, now, &mut notes);
     assert!(matches!(notes[0], Note::Refresh));
