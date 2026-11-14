@@ -36,15 +36,19 @@ impl<'de> Deserialize<'de> for PreferCopy {
 }
 
 impl PreferCopy {
-    // The Sources control is added by the combined-album UI pass.
-    #[allow(dead_code)]
     pub const ALL: [Self; 2] = [Self::SourceOrder, Self::BestQuality];
 
-    #[allow(dead_code)]
     pub fn label(self) -> &'static str {
         match self {
             Self::SourceOrder => "Source order",
             Self::BestQuality => "Best quality",
+        }
+    }
+
+    pub fn hint(self) -> &'static str {
+        match self {
+            Self::SourceOrder => "A song on more than one source plays from the one listed first above, if it's reachable.",
+            Self::BestQuality => "A song on more than one source plays its lossless copy, else the one with the highest bitrate.",
         }
     }
 }

@@ -134,8 +134,7 @@ pub enum PrefsAction {
     /// Show an album more than one source holds once, with every song
     /// from each.
     CombineCopies(bool),
-    /// The Sources control is added by the combined-album UI pass.
-    #[allow(dead_code)]
+    /// Which copy of a combined song plays, is rated and is downloaded.
     PreferCopy(crate::settings::PreferCopy),
     AlbumView(crate::settings::ViewMode),
     ArtistView(crate::settings::ViewMode),

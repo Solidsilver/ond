@@ -9,7 +9,7 @@ use super::{AnalysisAction, OfflineAction, OutputAction, PrefsAction, WindowActi
 use crate::icons::{self, Icon};
 use crate::playback::{BITRATES, PlaybackPrefs, QualityMode, RgMode, TranscodeFormat};
 use crate::queue::{AddAt, ClearWhat, NextAt, OnPlay, Preset};
-use crate::settings::SourceKind;
+use crate::settings::{PreferCopy, SourceKind};
 use crate::theme::{Accent, ThemePref, Tokens, semibold};
 use crate::visuals::visualizer::Pick;
 use crate::visuals::waveform::{self, Bars};
@@ -862,10 +862,16 @@ impl OndApp {
             ui.add_space(8.0);
             ui.add(egui::Label::new(egui::RichText::new(line).size(12.0).color(t.muted)).wrap());
         }
-        let combine = self.ui.prefs.combine_copies;
+        let (combine, mut prefer) = (self.ui.prefs.combine_copies, self.ui.prefs.prefer_copy);
         group(ui, "Albums", |ui| {
             let hint = "Show an album that's on more than one source once, with every song from each.";
-            self.pref_switch(ui, "combine_copies", "Combine matching albums", hint, combine, PrefsAction::CombineCopies);
+            // Which copy plays only means something while copies are combined.
+            if self.pref_switch(ui, "combine_copies", "Combine matching albums", hint, combine, PrefsAction::CombineCopies) {
+                let locked = self.prefs.managed("prefer_copy");
+                if choice_row(ui, locked, "Prefer", prefer.hint(), &PreferCopy::ALL, &mut prefer, |p| p.label().into()) {
+                    self.actions.push(PrefsAction::PreferCopy(prefer).into());
+                }
+            }
         });
     }
 
