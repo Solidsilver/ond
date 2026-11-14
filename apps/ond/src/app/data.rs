@@ -326,6 +326,16 @@ pub struct SearchState {
     pub stale: bool,
     /// The latest index build asked for; older builds that land late are dropped.
     pub generation: u64,
+    /// Generation of the installed `index`; differs from `generation` while a
+    /// scope change or rebuild is queued or in flight.
+    pub index_generation: u64,
+}
+
+impl SearchState {
+    /// True once an index built for the current data and scope has landed.
+    pub(super) fn is_current(&self) -> bool {
+        !self.stale && self.index_generation == self.generation
+    }
 }
 
 /// A queue action waiting for tracks to load.
@@ -357,6 +367,7 @@ impl OndApp {
             }
             LibraryMsg::SearchIndex { generation, index } => {
                 if generation == self.search.generation {
+                    self.search.index_generation = generation;
                     self.install_search(*index);
                 }
             }
@@ -553,6 +564,8 @@ impl OndApp {
     /// Builds the index here and now (fixtures and tests).
     #[cfg(test)]
     pub(super) fn rebuild_search(&mut self) {
+        self.search.stale = false;
+        self.search.index_generation = self.search.generation;
         self.install_search(SearchIndex::new(&self.data.albums, &self.data.artists, self.data.tracks.searchable().iter()));
     }
 

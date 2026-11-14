@@ -305,6 +305,9 @@ impl OndApp {
         self.multi.scope = scope.clone();
         self.favorites.set_scope(scope);
         self.search.stale = true;
+        // Advance the generation now so an earlier build can't install over the
+        // new scope and `is_current()` flips false until the rebuild lands.
+        self.search.generation += 1;
     }
 
     pub(super) fn apply_scope(&mut self, action: ScopeAction) {
@@ -340,8 +343,6 @@ impl OndApp {
         self.ui.track_sel = None;
         self.ui.reveal = None;
         self.ui.palette = None;
-        self.search.index = None;
-        self.search.generation += 1;
         self.on_arrive();
     }
 
@@ -611,7 +612,11 @@ mod tests {
     }
 
     fn rig(dir: &std::path::Path, one: &JsonFake, two: &JsonFake) -> OndApp {
-        let mut app = fixture::populated(&egui::Context::default(), dir);
+        rig_with(&egui::Context::default(), dir, one, two)
+    }
+
+    fn rig_with(ctx: &egui::Context, dir: &std::path::Path, one: &JsonFake, two: &JsonFake) -> OndApp {
+        let mut app = fixture::populated(ctx, dir);
         app.data.clear();
         app.player = Default::default();
         app.favorites = Default::default();
@@ -1197,5 +1202,142 @@ mod tests {
         assert!(!store.is_starred(StarKind::Song, &TrackKey::new(account(1), "1")).unwrap());
         assert_eq!(one.count("/rest/star") + two.count("/rest/star"), 0);
         assert_eq!(one.count("/rest/setRating") + two.count("/rest/setRating"), 0);
+    }
+
+    fn frame(ctx: &egui::Context, app: &mut OndApp, events: Vec<egui::Event>) {
+        let input = egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1360.0, 860.0))), events, ..Default::default() };
+        let mut out = ctx.run_ui(input, |ui| app.main_ui(ui));
+        out.textures_delta.clear();
+    }
+
+    fn type_in_palette(ctx: &egui::Context, app: &mut OndApp, query: &str) {
+        let cmd_k = egui::Event::Key { key: egui::Key::K, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::COMMAND };
+        app.ui.palette = None;
+        frame(ctx, app, vec![cmd_k]);
+        assert!(app.ui.palette.is_some(), "palette should stay open while the old search index stands in");
+        frame(ctx, app, Vec::new());
+        frame(ctx, app, vec![egui::Event::Text(query.into())]);
+        frame(ctx, app, Vec::new());
+    }
+
+    #[test]
+    fn search_stays_available_across_scope_changes_and_filters_out_of_scope_hits() {
+        let dir = tempfile::tempdir().unwrap();
+        let one = server();
+        let two = server();
+        let ctx = egui::Context::default();
+        let mut app = rig_with(&ctx, dir.path(), &one, &two);
+
+        // Add one unique artist/album/track to each account alongside `rig`'s shared artist `"1"`.
+        for (a, ar_id, ar_name, shared_ar_name, al_id, al_name, tr_id, tr_name) in [
+            (account(1), "ar-1", "Miles Davis", "The Björk & Friends", "al-1", "Kind of Blue", "t-1", "So What"),
+            (account(2), "ar-2", "John Coltrane", "bjork and friends", "al-2", "Love Supreme", "t-2", "Acknowledgement"),
+        ] {
+            let mut base_album = fixture::album(0);
+            base_album.id = "1".into();
+            base_album.artist = Some("The Björk & Friends".into());
+            base_album.artist_ref = Some("1".into());
+            base_album.artists.clear();
+            base_album.song_count = 1;
+            let mut base_track = crate::test_tracks::track("1", "1", if a == account(1) { "One" } else { "Two" });
+            base_track.artist_ref = Some("1".into());
+
+            let mut album = fixture::album(1);
+            album.id = al_id.into();
+            album.name = al_name.into();
+            album.artist = Some(ar_name.into());
+            album.artist_ref = Some(ar_id.into());
+            album.artists.clear();
+            album.song_count = 1;
+            let mut track = crate::test_tracks::track(tr_id, al_id, tr_name);
+            track.artist = Some(ar_name.into());
+            track.artist_ref = Some(ar_id.into());
+
+            let shared = Artist { id: "1".into(), name: shared_ar_name.into(), sort: None, album_count: 1, cover_art: None };
+            let unique = Artist { id: ar_id.into(), name: ar_name.into(), sort: None, album_count: 1, cover_art: None };
+            inject(&mut app, Msg::Source { account: a, session: 0, message: Box::new(LibraryMsg::Albums(vec![base_album, album]).into()) });
+            inject(
+                &mut app,
+                Msg::Source {
+                    account: a,
+                    session: 0,
+                    message: Box::new(LibraryMsg::AllTracks(Box::new(crate::tracks::TrackSet::new(vec![base_track, track]))).into()),
+                },
+            );
+            inject(&mut app, Msg::Source { account: a, session: 0, message: Box::new(LibraryMsg::Artists(vec![shared, unique]).into()) });
+        }
+
+        app.rebuild_search();
+        assert!(app.search.is_current());
+
+        // Narrow to source 2 before any background rebuild arrives.
+        app.apply(Action::Scope(ScopeAction::One(account(2))));
+        assert!(app.search.index.is_some());
+        assert!(!app.search.is_current());
+
+        // Out-of-scope album, track, and artist yield no hits and cannot be acted on.
+        let enter = egui::Event::Key { key: egui::Key::Enter, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE };
+        let alt_enter = egui::Event::Key { key: egui::Key::Enter, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::ALT };
+
+        type_in_palette(&ctx, &mut app, "Kind of Blue");
+        assert!(app.ui.palette.as_ref().unwrap().results.top.is_none());
+        assert_eq!(app.ui.palette.as_ref().unwrap().results.len(), 0);
+        frame(&ctx, &mut app, vec![enter.clone()]);
+        assert_eq!(app.ui.nav.current(), &crate::nav::Route::Recent);
+
+        type_in_palette(&ctx, &mut app, "So What");
+        assert_eq!(app.ui.palette.as_ref().unwrap().results.len(), 0);
+        frame(&ctx, &mut app, vec![alt_enter.clone()]);
+        assert!(app.player.queue.upcoming.is_empty());
+
+        type_in_palette(&ctx, &mut app, "Miles Davis");
+        assert_eq!(app.ui.palette.as_ref().unwrap().results.len(), 0);
+        frame(&ctx, &mut app, vec![enter.clone()]);
+        assert_eq!(app.ui.nav.current(), &crate::nav::Route::Recent);
+
+        // Merged artist whose stale entry held account(1)'s id still opens account(2)'s member.
+        type_in_palette(&ctx, &mut app, "friends");
+        assert!(app.ui.palette.as_ref().unwrap().results.len() > 0);
+        frame(&ctx, &mut app, vec![enter.clone()]);
+        assert_eq!(app.ui.nav.current(), &crate::nav::Route::Artist { name: "bjork and friends".into(), id: Some(key(account(2), "1")) });
+
+        // In-scope album resolves immediately from the kept index.
+        type_in_palette(&ctx, &mut app, "Love Supreme");
+        frame(&ctx, &mut app, vec![enter.clone()]);
+        assert_eq!(app.ui.nav.current(), &crate::nav::Route::Album(key(account(2), "al-2")));
+
+        // Start a background rebuild, change scope via chip toggle mid-flight, and verify stale builds drop.
+        app.apply(Action::Scope(ScopeAction::All));
+        app.after_messages();
+        let stale_gen = app.search.generation;
+
+        app.apply(Action::Scope(ScopeAction::Chip(shell::kit::SourceChip::Toggle(account(1)))));
+        assert!(app.search.index.is_some());
+        assert!(!app.search.is_current());
+        assert!(app.search.generation > stale_gen);
+
+        // Immediately after a chip toggle, searching finds source 1's item and skips source 2's.
+        type_in_palette(&ctx, &mut app, "Love Supreme");
+        assert_eq!(app.ui.palette.as_ref().unwrap().results.len(), 0);
+        type_in_palette(&ctx, &mut app, "Kind of Blue");
+        assert!(app.ui.palette.as_ref().unwrap().results.len() > 0);
+        frame(&ctx, &mut app, vec![enter]);
+        assert_eq!(app.ui.nav.current(), &crate::nav::Route::Album(key(account(1), "al-1")));
+
+        let empty = Box::new(crate::search::SearchIndex::new(&[], &[], std::iter::empty()));
+        app.handle(LibraryMsg::SearchIndex { generation: stale_gen, index: empty });
+        assert!(!app.search.is_current(), "stale rebuild from before scope change must be dropped");
+        assert!(!app.search.index.as_ref().unwrap().albums.is_empty());
+
+        app.after_messages();
+        let deadline = Deadline::new();
+        while !app.search.is_current() {
+            assert!(!deadline.passed(), "rebuilt search index did not land");
+            if let Ok(msg) = app.inbox.recv_timeout(Duration::from_millis(10)) {
+                app.handle(msg);
+                app.after_messages();
+            }
+        }
+        assert!(app.search.index.as_ref().unwrap().albums.iter().all(|al| identity::account(&al.id) == Some(account(1))));
     }
 }
