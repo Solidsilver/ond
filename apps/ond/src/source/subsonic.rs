@@ -202,8 +202,10 @@ impl Fetch for SubsonicSource {
     fn artist_mbids(&self) -> Vec<(String, String)> {
         self.artist_mbids.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
+    /// Takes what's been seen since the last call: each save merges into
+    /// the stored table, so one album's fetch writes only that album's ids.
     fn copy_mbids(&self) -> super::mbids::CopyMbids {
-        self.copy_mbids.lock().unwrap_or_else(|e| e.into_inner()).clone()
+        std::mem::take(&mut *self.copy_mbids.lock().unwrap_or_else(|e| e.into_inner()))
     }
     async fn album_page(&self, size: u32, offset: u32) -> Result<Vec<Album>, Failure> {
         let albums = self.client.album_list(AlbumListType::AlphabeticalByArtist, size, offset).await?;

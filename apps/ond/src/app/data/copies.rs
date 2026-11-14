@@ -78,7 +78,9 @@ impl Data {
 
     pub(super) fn combine_copies(&mut self, sources: &[&Data]) {
         let originals = self.tracks.clone();
-        let albums: Vec<_> = sources.iter().flat_map(|d| d.albums.iter()).collect();
+        // Rows are qualified at the message boundary; one that somehow isn't
+        // stays a plain album of its own rather than taking the view down.
+        let (albums, loose): (Vec<_>, Vec<_>) = sources.iter().flat_map(|d| d.albums.iter()).partition(|a| ItemKey::parse(&a.id).is_ok());
         let mut artist_groups = HashMap::<&str, Vec<usize>>::new();
         for (i, group) in self.merged_artists.iter().enumerate() {
             for id in group.albums.values().flatten() {
@@ -93,11 +95,9 @@ impl Data {
                 Some(copies::AlbumIdentity { key, artist, title: album.name.clone(), release: self.album_mbids.get(&album.id).cloned() })
             })
             .collect();
-        // All live source rows are qualified at the message boundary.
-        assert_eq!(identities.len(), albums.len());
         self.copy_albums = albums.iter().map(|a| (a.id.clone(), (*a).clone())).collect();
-        let mut visible_albums = Vec::new();
-        let mut visible_tracks = Vec::new();
+        let mut visible_albums: Vec<Album> = loose.iter().map(|a| (*a).clone()).collect();
+        let mut visible_tracks: Vec<Track> = loose.iter().filter_map(|a| originals.album(&a.id)).flat_map(|s| s.iter().cloned()).collect();
         for group in copies::albums(&identities) {
             let mut album = albums[group[0]].clone();
             if group.len() == 1 {
@@ -110,17 +110,16 @@ impl Data {
                     self.album_leads.insert(key.to_string(), album.id.clone());
                 }
                 self.album_copies.insert(album.id.clone(), keys);
-                let songs: Vec<_> = group.iter().filter_map(|&i| originals.album(&albums[i].id)).flat_map(|s| s.iter()).collect();
-                let song_ids: Vec<_> = songs
+                let (songs, song_ids): (Vec<_>, Vec<_>) = group
                     .iter()
-                    .map(|s| copies::SongIdentity {
-                        key: ItemKey::parse(&s.id).expect("qualified song"),
-                        title: s.title.clone(),
-                        disc: s.disc,
-                        track: s.track,
-                        recording: self.recording_mbids.get(&s.id).cloned(),
+                    .filter_map(|&i| originals.album(&albums[i].id))
+                    .flat_map(|s| s.iter())
+                    .filter_map(|s| {
+                        let key = ItemKey::parse(&s.id).ok()?;
+                        let recording = self.recording_mbids.get(&s.id).cloned();
+                        Some((s, copies::SongIdentity { key, title: s.title.clone(), disc: s.disc, track: s.track, recording }))
                     })
-                    .collect();
+                    .unzip();
                 let mut union = Vec::new();
                 for members in copies::songs(&song_ids) {
                     let mut song = songs[members[0]].clone();
@@ -147,7 +146,7 @@ impl Data {
             }
             visible_albums.push(album);
         }
-        let known: HashSet<_> = albums.iter().map(|a| a.id.as_str()).collect();
+        let known: HashSet<_> = albums.iter().chain(&loose).map(|a| a.id.as_str()).collect();
         visible_tracks.extend(originals.searchable().iter().filter(|s| !known.contains(s.album_id.as_str())).cloned());
         visible_albums.sort_by_cached_key(|a| (a.sort_parts(), a.id.clone()));
         self.set_albums(visible_albums);
