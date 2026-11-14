@@ -283,11 +283,12 @@ pub enum Action {
     Offline(OfflineAction),
     /// Library analysis.
     Analysis(AnalysisAction),
-    /// Split a combined album into its copies; the menu is added by the UI pass.
-    #[allow(dead_code)]
+    /// Split a combined album, named by its lead's account-qualified key,
+    /// into its copies.
     KeepApart(String),
+    /// Forget the pairs a Keep apart stored: its toast's Undo.
+    UndoKeepApart(crate::store::ApartPairs),
     /// Clear the stored exclusions involving this account-qualified album.
-    #[allow(dead_code)]
     CombineAgain(String),
     /// Love or unlove a song, album or artist. `track` / `name` keep the
     /// Favorites view current.
@@ -898,9 +899,10 @@ impl OndApp {
             Action::Offline(a) => self.apply_offline(a),
             Action::Analysis(a) => self.apply_analysis(a),
             Action::KeepApart(id) => self.keep_copies_apart(&id),
+            Action::UndoKeepApart(pairs) => self.bridge.separate_copies(crate::store::Separation::Forget(pairs)),
             Action::CombineAgain(id) => {
                 if let Ok(key) = accounts::ItemKey::parse(&id) {
-                    self.bridge.separate_copies(Default::default(), Some(key));
+                    self.bridge.separate_copies(crate::store::Separation::CombineAgain(key));
                 }
             }
             Action::ToggleStar { kind, id, track, name } => self.toggle_star(kind, id, track.map(|t| *t), name),

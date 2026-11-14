@@ -384,7 +384,9 @@ impl OndApp {
         self.on_arrive();
     }
 
-    pub(super) fn keep_copies_apart(&self, id: &str) {
+    /// Stores every pair in the album's group, so no third copy can bridge
+    /// two of them, and offers to undo exactly that.
+    pub(super) fn keep_copies_apart(&mut self, id: &str) {
         let copies = self.data.copies_of_album(id);
         let mut pairs = crate::store::ApartPairs::new();
         for (i, a) in copies.iter().enumerate() {
@@ -392,7 +394,12 @@ impl OndApp {
                 pairs.insert(crate::store::album_pair(a.clone(), b.clone()));
             }
         }
-        self.bridge.separate_copies(pairs, None);
+        if pairs.is_empty() {
+            return;
+        }
+        let name = self.data.album(id).map_or_else(|| "the album".to_owned(), |a| a.name.clone());
+        self.ui.toasts.note(format!("Kept the copies of {name} apart"), "Undo", Action::UndoKeepApart(pairs.clone()));
+        self.bridge.separate_copies(crate::store::Separation::Keep(pairs));
     }
 
     pub(super) fn need_song_stats(&mut self, id: String) {

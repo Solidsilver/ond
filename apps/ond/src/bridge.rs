@@ -1426,14 +1426,16 @@ impl Bridge {
 
     /// Album exclusions belong to this installation, across source sessions.
     /// Serializing writes also keeps a rapid Keep apart / Combine again ordered.
-    pub fn separate_copies(&self, pairs: crate::store::ApartPairs, combine: Option<accounts::ItemKey>) {
+    pub fn separate_copies(&self, change: crate::store::Separation) {
+        use crate::store::Separation;
         let store = self.ond_store.clone();
         let post = self.poster();
         self.after_previous("copy-separation".into(), async move {
             let result = tokio::task::spawn_blocking(move || {
-                match combine {
-                    Some(key) => store.combine_again(&key)?,
-                    None => store.keep_apart(&pairs)?,
+                match &change {
+                    Separation::Keep(pairs) => store.keep_apart(pairs)?,
+                    Separation::Forget(pairs) => store.forget_apart(pairs)?,
+                    Separation::CombineAgain(key) => store.combine_again(key)?,
                 }
                 store.apart_pairs()
             })

@@ -605,11 +605,36 @@ impl ViewCtx<'_> {
     /// An album's right-click menu, on its tile or its row.
     pub(super) fn album_menu(&mut self, ui: &mut Ui, album: &library::Album, kept: bool) {
         collection_menu(ui, &Collection::Album(album.id.clone()), true, self.session.caps().downloads.then_some(kept), None, self.actions);
+        self.copies_items(ui, &album.id);
         if let Some(name) = &album.artist {
             ui.separator();
             if ui.button(format!("Go to {name}")).clicked() {
                 self.actions.push(Action::Go(Route::Artist { name: name.clone(), id: album.artist_ref.clone() }));
             }
+        }
+    }
+
+    /// An album's menu items for its copies, while they're combined and
+    /// more than one source is in view: Keep apart on a combined album, and
+    /// Combine again on one kept apart from a copy that's still in view.
+    pub(super) fn copies_items(&mut self, ui: &mut Ui, id: &str) {
+        if !self.ui.prefs.combine_copies || !super::source_look::mixed(self.session) {
+            return;
+        }
+        let (data, session) = (self.data, self.session);
+        let copies = data.copies_of_album(id);
+        let in_view = |key: &accounts::ItemKey| session.accounts.contains_key(&key.account) && session.scope.includes(key.account);
+        let apart: Vec<&accounts::ItemKey> =
+            copies.iter().filter(|k| data.apart_pairs.iter().any(|(a, b)| (a == *k && in_view(b)) || (b == *k && in_view(a)))).collect();
+        if copies.len() < 2 && apart.is_empty() {
+            return;
+        }
+        ui.separator();
+        if copies.len() > 1 && ui.button("Keep apart").on_hover_text("Show each source's copy as an album of its own").clicked() {
+            self.actions.push(Action::KeepApart(data.album_lead(id).to_owned()));
+        }
+        if !apart.is_empty() && ui.button("Combine again").on_hover_text("Show this album as one with its copies on other sources").clicked() {
+            self.actions.extend(apart.into_iter().map(|key| Action::CombineAgain(key.to_string())));
         }
     }
 }

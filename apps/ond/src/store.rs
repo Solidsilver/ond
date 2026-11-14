@@ -39,6 +39,18 @@ pub fn album_pair(a: ItemKey, b: ItemKey) -> (ItemKey, ItemKey) {
     if a < b { (a, b) } else { (b, a) }
 }
 
+/// A change to which album copies are kept apart.
+#[derive(Debug, Clone)]
+pub enum Separation {
+    /// Keep each pair apart.
+    Keep(ApartPairs),
+    /// Forget exactly these pairs: the undo of a [`Keep`](Self::Keep),
+    /// which leaves the album's other choices standing.
+    Forget(ApartPairs),
+    /// Forget every pair involving this album.
+    CombineAgain(ItemKey),
+}
+
 const SCHEMA_KEY: &str = "schema_version";
 
 const KIND_SONG: u8 = 1;
@@ -215,6 +227,19 @@ impl OndStore {
                     let (a, b) = album_pair(a.clone(), b.clone());
                     table.insert((a.to_string().as_str(), b.to_string().as_str()), bytes.as_slice())?;
                 }
+            }
+        }
+        Ok(wt.commit()?)
+    }
+
+    /// Forgets exactly `pairs`, whichever way round each was given.
+    pub fn forget_apart(&self, pairs: &ApartPairs) -> Result<()> {
+        let wt = self.db.begin_write()?;
+        {
+            let mut table = wt.open_table(APART)?;
+            for (a, b) in pairs {
+                let (a, b) = album_pair(a.clone(), b.clone());
+                table.remove((a.to_string().as_str(), b.to_string().as_str()))?;
             }
         }
         Ok(wt.commit()?)

@@ -267,3 +267,17 @@ fn a_stale_playlist_replacement_preserves_entries_added_since_the_view_loaded() 
     assert!(store.replace_playlist_entries_if_unchanged(&playlist.id, &current, vec![deleted.clone(), deleted.clone()]).unwrap());
     assert_eq!(store.playlist(&playlist.id).unwrap().unwrap().entries, [deleted.clone(), deleted]);
 }
+
+#[test]
+fn forgetting_kept_apart_pairs_leaves_the_albums_other_choices() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = OndStore::open(dir.path().join("ond.redb")).unwrap();
+    let (a, b, c) = (ItemKey::new(acc(1), "al-1"), ItemKey::new(acc(2), "al-1"), ItemKey::new(acc(3), "al-1"));
+    let earlier = ApartPairs::from([album_pair(a.clone(), c.clone())]);
+    store.keep_apart(&earlier).unwrap();
+    let kept = ApartPairs::from([album_pair(a.clone(), b.clone())]);
+    store.keep_apart(&kept).unwrap();
+    // Given the other way round, the same pair is still forgotten.
+    store.forget_apart(&ApartPairs::from([(b, a)])).unwrap();
+    assert_eq!(store.apart_pairs().unwrap(), earlier);
+}

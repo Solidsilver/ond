@@ -400,6 +400,7 @@ impl ViewCtx<'_> {
         egui::Popup::menu(&more).show(|ui| {
             let c = super::browse::Collection::Album(album.id.clone());
             super::browse::collection_menu(ui, &c, false, caps.downloads.then_some(kept), Some("⇧⌘D"), self.actions);
+            self.copies_items(ui, &album.id);
             if !page.facts.summary.complete() && page.analysing == 0 && !tracks.is_empty() {
                 ui.separator();
                 if ui.button("Analyze album").on_hover_text("Measure loudness and dynamic range, and check for upsampled or lossy-sourced files").clicked() {

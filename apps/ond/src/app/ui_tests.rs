@@ -1204,6 +1204,73 @@ fn two_sources_name_their_controls_and_a_chip_narrows_the_library() {
     *h.state_mut() = None;
 }
 
+/// With matching albums combined, the Albums group offers Prefer, and a
+/// combined album's menu offers Keep apart; its toast's Undo combines the
+/// album again, and Combine again does the same from either copy's menu.
+#[test]
+fn keep_apart_splits_a_combined_album_and_undo_or_combine_again_rejoins_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = full_window(dir.path());
+    reset(&mut h, FULL, Route::Recent);
+    two_sources(app_mut(&mut h));
+    combined_copies(app_mut(&mut h));
+    app_mut(&mut h).apply(Action::OpenSettings(settings_page::Section::Sources));
+    h.run_steps(2);
+    h.check_accessibility();
+    h.get_by_label("Best quality").click();
+    h.run_steps(2);
+    assert_eq!(app_mut(&mut h).prefs_now().prefer_copy, crate::settings::PreferCopy::BestQuality);
+
+    let lead = accounts::ItemKey::new(crate::test_tracks::account(), album_id(0)).to_string();
+    let folder = accounts::ItemKey::new(local_account(), album_id(0)).to_string();
+    let albums = app_mut(&mut h).data.albums.len();
+    let more = |h: &mut Harness<'_, Option<OndApp>>| {
+        reset(h, FULL, Route::Album(lead.clone()));
+        h.get_by_role_and_label(egui::accesskit::Role::Button, "More").click();
+        h.run_steps(2);
+    };
+    // The choice is saved in the background; frames drawn here don't read
+    // the answer, so it's taken from the inbox.
+    let settle = |h: &mut Harness<'_, Option<OndApp>>, n: usize| {
+        let deadline = testkit::Deadline::new();
+        let app = app_mut(h);
+        while app.data.albums.len() != n {
+            assert!(!deadline.passed(), "the albums never became {n}");
+            if let Ok(msg) = app.inbox.recv_timeout(std::time::Duration::from_millis(10)) {
+                app.handle(msg);
+            }
+        }
+        h.run_steps(2);
+    };
+    more(&mut h);
+    assert!(h.query_by_label("Combine again").is_none(), "nothing to combine again yet");
+    h.check_accessibility();
+    h.get_by_label("Keep apart").click();
+    h.run_steps(2);
+    settle(&mut h, albums + 1);
+    let text = "Kept the copies of Sunday at the Village Vanguard apart";
+    assert_eq!(app_mut(&mut h).ui.toasts.button(text), Some("Undo"), "{:?}", app_mut(&mut h).ui.toasts.texts());
+    h.get_by_label("Undo").click();
+    h.run_steps(2);
+    settle(&mut h, albums);
+
+    more(&mut h);
+    h.get_by_label("Keep apart").click();
+    h.run_steps(2);
+    settle(&mut h, albums + 1);
+    for id in [&lead, &folder] {
+        reset(&mut h, FULL, Route::Album(id.clone()));
+        h.get_by_role_and_label(egui::accesskit::Role::Button, "More").click();
+        h.run_steps(2);
+        assert!(h.query_by_label("Keep apart").is_none(), "a copy on its own has nothing to keep apart");
+        h.get_by_label("Combine again");
+    }
+    h.get_by_label("Combine again").click();
+    h.run_steps(2);
+    settle(&mut h, albums);
+    *h.state_mut() = None;
+}
+
 /// The mixed-playlist offer says which source can't hold whose songs, and
 /// closing it without an answer declines it, so nothing is left waiting.
 #[test]
