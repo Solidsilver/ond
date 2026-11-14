@@ -1364,7 +1364,7 @@ fn source_scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
     // Every song from both copies, a dot for each copy a song has, and the
     // copies' formats under the facts.
     let vanguard = accounts::ItemKey::new(crate::test_tracks::account(), album_id(0)).to_string();
-    reset(h, FULL, Route::Album(vanguard));
+    reset(h, FULL, Route::Album(vanguard.clone()));
     s.shoot(h, "sources-combined-album");
 
     // By album, last first: Sunday at the Village Vanguard (songs on both,
@@ -1391,6 +1391,48 @@ fn source_scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
         }
     }
     s.shoot(h, "sources-combined-search");
+
+    // Only the folder's copies starred: the album's heart and the song's
+    // are lit all the same.
+    let folder = accounts::ItemKey::new(local_account(), album_id(0)).to_string();
+    {
+        let app = app_mut(h);
+        let song = app.multi.data[&local_account()].tracks.album(&folder).and_then(|songs| songs.first().cloned());
+        let starred = crate::favorites::Starred { songs: song.into_iter().collect(), albums: vec![folder.clone()], artists: Vec::new() };
+        app.favorites.load_source(local_account(), starred, Vec::new());
+        app.favorites.combine(&app.data, app.prefs_now().prefer_copy);
+    }
+    reset(h, FULL, Route::Album(vanguard.clone()));
+    s.shoot(h, "sources-combined-loved");
+
+    // Its menu offers Keep apart.
+    reset(h, FULL, Route::Album(vanguard.clone()));
+    h.run_steps(2);
+    h.get_by_role_and_label(egui::accesskit::Role::Button, "More").click();
+    s.shoot(h, "sources-combined-menu");
+
+    // Kept apart: the two copies side by side again, with the toast's Undo.
+    reset(h, FULL, Route::Albums);
+    app_mut(h).ui.sort = AlbumSort::Added;
+    {
+        let app = app_mut(h);
+        app.apply(Action::KeepApart(vanguard.clone()));
+        let deadline = testkit::Deadline::new();
+        while app.multi.apart_pairs.is_empty() {
+            assert!(!deadline.passed(), "the copies were never kept apart");
+            if let Ok(msg) = app.inbox.recv_timeout(std::time::Duration::from_millis(10)) {
+                app.handle(msg);
+            }
+        }
+    }
+    s.shoot(h, "sources-combined-apart");
+    app_mut(h).ui.sort = AlbumSort::Artist;
+
+    // Either copy's menu offers Combine again.
+    reset(h, FULL, Route::Album(folder));
+    h.run_steps(2);
+    h.get_by_role_and_label(egui::accesskit::Role::Button, "More").click();
+    s.shoot(h, "sources-combined-apart-menu");
 }
 
 /// Settings with some set in managed.json (as the Home Manager module writes
