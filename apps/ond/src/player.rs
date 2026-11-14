@@ -653,6 +653,7 @@ mod tests {
     #[derive(Default)]
     struct FakeSources {
         unplayable: HashSet<String>,
+        copies: std::collections::HashMap<String, Vec<Track>>,
         /// As if connecting: the server should answer soon.
         waiting: bool,
     }
@@ -670,6 +671,9 @@ mod tests {
                 transcode: None,
                 token,
             })
+        }
+        fn copies(&self, key: &crate::source::TrackKey) -> Vec<(crate::source::TrackKey, Track)> {
+            self.copies.get(&key.item).into_iter().flatten().map(|track| (crate::source::identity::key(key.account, &track.id), track.clone())).collect()
         }
         fn announce(&self, _: &Item) {}
         fn waiting(&self) -> bool {
@@ -1107,5 +1111,80 @@ mod tests {
         r.run(|p, cx| p.handle_engine(&error(Some("b")), cx));
         assert_eq!(r.engine.played(), ["a"]);
         assert_eq!(r.player.queue.current.as_ref().unwrap().track.id, "a");
+    }
+    fn match_copies(r: &mut Rig, ids: &[&str]) {
+        for id in ids {
+            r.sources.copies.insert((*id).to_owned(), tracks(ids));
+        }
+    }
+
+    #[test]
+    fn a_failed_copy_retries_the_song_in_the_same_slot_before_skipping() {
+        let mut r = Rig::new();
+        match_copies(&mut r, &["a", "copy"]);
+        r.run(|p, cx| p.queue_tracks(crate::test_tracks::account(), tracks(&["a", "next"]), source(), QueueAction::Play { start: 0 }, cx));
+        let uid = r.uid_of("a");
+        r.run(|p, cx| p.handle_engine(&error(Some("a")), cx));
+        assert_eq!(r.engine.played(), ["a", "copy"]);
+        assert_eq!(r.player.queue.current.as_ref().unwrap().uid, uid);
+        assert!(r.player.queue.history.is_empty());
+        r.run(|p, cx| p.handle_engine(&error(Some("copy")), cx));
+        assert_eq!(r.engine.played(), ["a", "copy", "next"]);
+        assert_eq!(r.player.queue.history.len(), 1);
+    }
+
+    #[test]
+    fn exhausting_copies_does_not_loop_and_a_new_attempt_gets_its_own_budget() {
+        let mut r = Rig::new();
+        match_copies(&mut r, &["a", "copy"]);
+        r.run(|p, cx| p.queue_tracks(crate::test_tracks::account(), tracks(&["a"]), source(), QueueAction::Play { start: 0 }, cx));
+        for id in ["a", "copy", "copy"] {
+            r.run(|p, cx| p.handle_engine(&error(Some(id)), cx));
+        }
+        assert_eq!(r.engine.played(), ["a", "copy"]);
+        r.run(|p, cx| p.start_current(cx));
+        r.run(|p, cx| p.handle_engine(&error(Some("copy")), cx));
+        r.run(|p, cx| p.handle_engine(&error(Some("a")), cx));
+        assert_eq!(r.engine.played(), ["a", "copy", "copy", "a"]);
+    }
+
+    #[test]
+    fn decode_errors_and_failures_after_start_do_not_switch_copies() {
+        let mut r = Rig::new();
+        match_copies(&mut r, &["a", "copy"]);
+        r.run(|p, cx| p.queue_tracks(crate::test_tracks::account(), tracks(&["a"]), source(), QueueAction::Play { start: 0 }, cx));
+        let decode =
+            audio::Event::Error { kind: audio::ErrorKind::Other, track_id: Some(crate::test_tracks::key("a").to_string()), message: "bad file".into() };
+        r.run(|p, cx| p.handle_engine(&decode, cx));
+        assert_eq!(r.engine.played(), ["a"]);
+        r.started(r.uid_of("a"), false);
+        r.run(|p, cx| p.handle_engine(&error(Some("a")), cx));
+        assert_eq!(r.engine.played(), ["a"]);
+    }
+
+    #[test]
+    fn a_copy_that_goes_offline_while_queued_is_replaced_when_it_starts() {
+        let mut r = Rig::new();
+        match_copies(&mut r, &["a", "copy"]);
+        r.run(|p, cx| p.queue_tracks(crate::test_tracks::account(), tracks(&["a"]), source(), QueueAction::Add, cx));
+        r.sources.unplayable.insert("a".into());
+        r.run(|p, cx| p.play_pause(cx));
+        assert_eq!(r.engine.played(), ["copy"]);
+        assert!(r.player.queue.history.is_empty());
+    }
+
+    #[test]
+    fn a_failed_gapless_prefetch_is_not_retried_when_the_song_becomes_current() {
+        let mut r = Rig::new();
+        match_copies(&mut r, &["a", "copy"]);
+        r.run(|p, cx| p.queue_tracks(crate::test_tracks::account(), tracks(&["before", "a"]), source(), QueueAction::Play { start: 0 }, cx));
+        r.started(r.uid_of("before"), false);
+        r.run(|p, cx| p.handle_engine(&error(Some("a")), cx));
+        // An unrelated queue edit must not prepare the failed stream again.
+        r.run(|p, cx| p.sync_next(cx));
+        assert_eq!(r.engine.last_next(), Some(None));
+        let ended = r.ended("before");
+        r.run(|p, cx| p.handle_engine(&ended, cx));
+        assert_eq!(r.engine.played(), ["before", "copy"]);
     }
 }

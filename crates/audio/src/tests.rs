@@ -2101,3 +2101,22 @@ fn a_file_shrunk_below_the_linger_floor_still_hands_over_to_the_next() {
     assert!((engine.status.silence_saved_secs() - 1.77).abs() < 1e-9);
     engine.shutdown(Duration::from_secs(2));
 }
+
+#[test]
+fn missing_files_and_undecodable_files_have_distinct_failure_kinds() {
+    let dir = tempfile::tempdir().unwrap();
+    let invalid = dir.path().join("invalid.wav");
+    std::fs::write(&invalid, b"not audio").unwrap();
+    let engine = spawn(EngineConfig::default(), Box::new(FakeBackend::new(caps(None, 192_000))), None);
+    for (path, kind) in [(dir.path().join("gone.wav"), ErrorKind::Unavailable), (invalid, ErrorKind::Other)] {
+        engine.send(Command::Play(TrackSource {
+            id: "song".into(),
+            url: format!("file://{}", path.display()),
+            suffix: Some("wav".into()),
+            ..Default::default()
+        }));
+        let seen = events_until(&engine, |e| matches!(e, Event::Error { .. }));
+        assert!(matches!(seen.last(), Some(Event::Error { kind: actual, .. }) if *actual == kind), "{seen:?}");
+    }
+    engine.send(Command::Shutdown);
+}

@@ -2064,4 +2064,206 @@ mod tests {
         app.apply(action);
         assert!(app.prefs_now().combine_copies);
     }
+    fn copy_playback_rig(dir: &std::path::Path, one: &JsonFake, two: &JsonFake) -> OndApp {
+        let mut app = rig(dir, one, two);
+        inject_copy(&mut app, account(1), "Record", Some("release"), &[1]);
+        inject_copy(&mut app, account(2), "Record", Some("release"), &[1]);
+        combine(&mut app, true);
+        app
+    }
+
+    fn add_copy(app: &mut OndApp, member: AccountId) -> AccountId {
+        let track = app.data.track_copy(&key(member, "1")).unwrap().clone();
+        app.queue_tracks(vec![track], crate::queue::Source::Added, QueueAction::Add);
+        app.player.queue.upcoming.last().unwrap().key.account
+    }
+
+    #[test]
+    fn source_order_queues_the_lead_even_from_a_non_lead_playlist_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let one = server();
+        let two = server();
+        let mut app = copy_playback_rig(dir.path(), &one, &two);
+        let entry = app.data.track_copy(&key(account(2), "1")).unwrap().clone();
+        let playlist = key(account(2), "list");
+        app.data.playlist_tracks.insert(playlist.clone(), vec![entry].into());
+        app.apply(Action::Playlist(playlist, QueueAction::Add));
+        assert_eq!(app.player.queue.upcoming.last().unwrap().key.account, account(1));
+        app.prefs.edit(|s| s.sources.reverse());
+        app.project_sources();
+        assert_eq!(add_copy(&mut app, account(1)), account(2));
+    }
+
+    #[test]
+    fn best_quality_queues_flac_ahead_of_an_mp3_lead_and_preserves_real_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let one = server();
+        let two = server();
+        let mut app = copy_playback_rig(dir.path(), &one, &two);
+        app.prefs.edit(|s| s.sources.reverse());
+        app.project_sources();
+        app.apply(Action::Prefs(super::super::PrefsAction::PreferCopy(crate::settings::PreferCopy::BestQuality)));
+        assert_eq!(add_copy(&mut app, account(2)), account(1));
+        let item = app.player.queue.upcoming.last().unwrap();
+        assert_eq!(item.key.to_string(), key(account(1), "1"));
+        assert_eq!(item.track.id, item.key.to_string());
+        assert_eq!(item.track.suffix.as_deref(), Some("flac"));
+    }
+
+    #[test]
+    fn an_unreachable_source_is_skipped_before_the_song_enters_the_queue() {
+        let dir = tempfile::tempdir().unwrap();
+        let one = server();
+        let two = server();
+        let mut app = copy_playback_rig(dir.path(), &one, &two);
+        app.session.accounts.get_mut(&account(1)).unwrap().unreachable = true;
+        assert_eq!(add_copy(&mut app, account(1)), account(2));
+        let state = app.session.accounts.get_mut(&account(1)).unwrap();
+        state.unreachable = false;
+        state.online = false;
+        assert_eq!(add_copy(&mut app, account(1)), account(2));
+    }
+
+    #[test]
+    fn work_offline_keeps_local_copies_reachable_without_using_server_copies() {
+        let dir = tempfile::tempdir().unwrap();
+        let one = server();
+        let two = server();
+        let mut app = copy_playback_rig(dir.path(), &one, &two);
+        let mut source = crate::source::fake::Fake::new(crate::source::Capabilities::local());
+        source.account = account(2);
+        app.session.accounts.get_mut(&account(2)).unwrap().source = Some(Arc::new(source));
+        app.session.work_offline = true;
+        assert_eq!(add_copy(&mut app, account(1)), account(2));
+    }
+
+    #[test]
+    fn disabling_combination_preserves_the_requested_copy_with_either_preference() {
+        let dir = tempfile::tempdir().unwrap();
+        let one = server();
+        let two = server();
+        let mut app = copy_playback_rig(dir.path(), &one, &two);
+        combine(&mut app, false);
+        for prefer in [crate::settings::PreferCopy::SourceOrder, crate::settings::PreferCopy::BestQuality] {
+            app.apply(Action::Prefs(super::super::PrefsAction::PreferCopy(prefer)));
+            assert_eq!(add_copy(&mut app, account(2)), account(2));
+        }
+    }
+
+    #[test]
+    fn prefer_copy_defaults_leniently_round_trips_and_honors_its_managed_lock() {
+        use crate::settings::PreferCopy;
+        assert_eq!(Settings::default().prefer_copy, PreferCopy::SourceOrder);
+        for json in [r#"{}"#, r#"{"prefer_copy":"future"}"#, r#"{"prefer_copy":42}"#] {
+            assert_eq!(Settings::from_json(json.as_bytes()).unwrap().prefer_copy, PreferCopy::SourceOrder);
+        }
+        let settings = Settings { prefer_copy: PreferCopy::BestQuality, ..Default::default() };
+        assert_eq!(Settings::from_json(&serde_json::to_vec(&settings).unwrap()).unwrap().prefer_copy, PreferCopy::BestQuality);
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("managed.json"), r#"{"prefer_copy":"best-quality"}"#).unwrap();
+        let mut app = fixture::populated(&egui::Context::default(), dir.path());
+        assert_eq!(app.prefs_now().prefer_copy, PreferCopy::BestQuality);
+        let action = Action::Prefs(super::super::PrefsAction::PreferCopy(PreferCopy::SourceOrder));
+        assert!(app.locked(&action));
+        app.apply(action);
+        assert_eq!(app.prefs_now().prefer_copy, PreferCopy::BestQuality);
+    }
+
+    #[test]
+    fn a_missing_stream_falls_back_to_the_other_copy_and_reports_that_copy_started() {
+        let dir = tempfile::tempdir().unwrap();
+        let one = JsonFake::start(|request| {
+            if request.path() == "/rest/stream" {
+                Answer::new("404 Not Found", "gone")
+            } else {
+                Answer::ok(json!({"subsonic-response":{"status":"ok","version":"1.16.1"}}).to_string())
+            }
+        });
+        let two = server();
+        let mut app = copy_playback_rig(dir.path(), &one, &two);
+        let audio = testkit::RangeServer::start(include_bytes!("../../../../crates/audio/testdata/sine-a.mp3").to_vec(), testkit::Serve::fast());
+        app.session.accounts.get_mut(&account(2)).unwrap().source =
+            Some(Arc::new(SubsonicSource::new(account(2), subsonic::Client::new(audio.base(), subsonic::Credentials::new("me", "p")).unwrap())));
+        let track = app.data.track(&key(account(1), "1")).unwrap().clone();
+        app.queue_tracks(vec![track], crate::queue::Source::Added, QueueAction::Play { start: 0 });
+        let uid = app.player.queue.current.as_ref().unwrap().uid;
+        let deadline = Deadline::new();
+        loop {
+            assert!(!deadline.passed(), "the fallback copy never started");
+            if let Ok(msg) = app.inbox.recv_timeout(Duration::from_millis(10)) {
+                let started = matches!(&msg, Msg::Engine(audio::Event::TrackStarted { track_id, .. }) if track_id == &key(account(2), "1"));
+                app.handle(msg);
+                if started {
+                    break;
+                }
+            }
+        }
+        let current = app.player.queue.current.as_ref().unwrap();
+        assert_eq!((current.uid, current.key.account), (uid, account(2)));
+        assert!(app.player.queue.history.is_empty());
+        assert_eq!(one.count("/rest/stream"), 1);
+        assert!(!audio.requests().is_empty());
+        assert_eq!(app.player.playing_from.as_ref().unwrap().id, key(account(2), "1"));
+        // A returning source changes future choices, never this running slot.
+        let state = app.session.accounts.get_mut(&account(1)).unwrap();
+        state.online = true;
+        state.unreachable = false;
+        app.sync_next();
+        assert_eq!(app.player.queue.current.as_ref().unwrap().key.account, account(2));
+    }
+
+    #[test]
+    fn bitrate_breaks_quality_ties_and_equal_quality_keeps_source_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let one = server();
+        let two = server();
+        let mut app = copy_playback_rig(dir.path(), &one, &two);
+        app.apply(Action::Prefs(super::super::PrefsAction::PreferCopy(crate::settings::PreferCopy::BestQuality)));
+        for (first_bitrate, expected) in [(128, account(2)), (320, account(1))] {
+            for a in [account(1), account(2)] {
+                let track = library::Track {
+                    disc: Some(1),
+                    track: Some(1),
+                    suffix: Some("mp3".into()),
+                    bit_rate_kbps: Some(if a == account(1) { first_bitrate } else { 320 }),
+                    ..crate::test_tracks::track("1", "1", "Song 1")
+                };
+                inject(
+                    &mut app,
+                    Msg::Source {
+                        account: a,
+                        session: 0,
+                        message: Box::new(LibraryMsg::AllTracks(Box::new(crate::tracks::TrackSet::new(vec![track]))).into()),
+                    },
+                );
+            }
+            assert_eq!(add_copy(&mut app, account(1)), expected);
+        }
+    }
+
+    #[test]
+    fn a_pinned_copy_is_playable_even_when_its_server_is_offline() {
+        let dir = tempfile::tempdir().unwrap();
+        let one = server();
+        let two = server();
+        let mut app = copy_playback_rig(dir.path(), &one, &two);
+        let file = dir.path().join("cached.flac");
+        std::fs::write(&file, b"fLaC").unwrap();
+        let store = offline::OfflineStore::open(
+            offline::OfflineConfig { dir: dir.path().join("pinned"), limit: None, reply_check: Default::default() },
+            app._rt.rt.as_ref().unwrap().handle().clone(),
+            Arc::new(|| {}),
+        )
+        .unwrap();
+        store.set_cache_lookup(Arc::new(move |_| Some(file.clone())));
+        let id = key(account(1), "1");
+        store.pin(offline::Pin::Track(id.clone()), "Song 1", vec![offline::TrackRef::new(id.clone(), Some("flac".into()), None)]);
+        testkit::wait_until("the pinned copy", || store.snapshot().is_done(&id));
+        app.downloads.owner = Some(account(1));
+        app.downloads.snap = store.snapshot();
+        app.downloads.store = Some(store);
+        app.session.work_offline = true;
+        app.session.accounts.get_mut(&account(1)).unwrap().online = false;
+        assert_eq!(add_copy(&mut app, account(2)), account(1));
+    }
 }

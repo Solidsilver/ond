@@ -361,3 +361,51 @@ milestone 4 drawing. Preferred-copy choice and playback fallback (stage 2),
 and shared stars, ratings, play counts, downloads and Keep apart (stage 3)
 remain for their own passes. Copies stay in source order for those stages;
 queue, playlist and pin identities remain ordinary member keys.
+
+## Ond backend handoff (milestone 5, stage 2)
+
+- `Settings.prefer_copy` and `PrefsView.prefer_copy` use
+  `settings::PreferCopy::{SourceOrder, BestQuality}`. Source order is the
+  default; JSON and Home Manager use `"source-order"` / `"best-quality"`.
+  Unknown values fall back to source order. The future Sources control
+  should dispatch `Action::Prefs(PrefsAction::PreferCopy(value))` and show
+  the usual `prefer_copy` managed lock. This stage adds no Settings row.
+- `player::Sources::copies` supplies real member keys and original track
+  rows in preference order. `AppSources` in `app/playing.rs` implements it
+  using the current combined projection and each account's session. The
+  shared `Player::enqueue` path chooses the first playable copy for Play,
+  Shuffle, Play Next and Add, including non-lead playlist entries. Quality
+  sorts lossless first, then descending bitrate (unknown is zero), with
+  settings source order breaking ties. With combination off, rows keep
+  their requested copy. Queue keys and the saved queue layout are unchanged.
+- Reachability is per account, independent of the focused source. A
+  connecting, signed-out or unreachable server is unavailable; Work Offline
+  also excludes server streams while local sources stay available. Pinned
+  downloads and complete stream-cache files remain playable without their
+  server. Selection checks availability without opening a stream.
+- `Player::start_current` checks alternatives if a queued source has gone
+  away. A pre-start `audio::Event::Error` with `ErrorKind::Unavailable`
+  tries the remaining playable members before the existing next-song skip.
+  The actual copy replaces the current slot's key and row, retaining its
+  uid, queue source and position. Each member is tried once per start
+  attempt; retry state is runtime only. Failed gapless prefetches are also
+  remembered until that slot starts. A later source recovery never changes
+  a song already playing.
+- Failure policy: missing local files and stream acquisition failures
+  (including exhausted network retries and HTTP/server rejections) permit
+  fallback. Remote I/O failures while probing or reading also permit it, except
+  cancellation and unexpected EOF. Available files that fail probing or
+  decoding, local permission failures, output/device errors, and failures
+  after TrackStarted do not switch copies. An undecodable or truncated
+  available file is not evidence that its source disappeared. Successful
+  fallback probes the failed account without showing a skipped-song error.
+- The UI can show the playing member directly from
+  `player.queue.current.key.account` and its original `track` format.
+  `player.playing_from` and `playing::origin` still describe download,
+  cache, local file or stream. New enqueue actions use the current setting;
+  changing it or restoring a source does not rewrite existing queue slots.
+
+The Transport/Sources/Note boundary, session-scoped bridge work and audio
+callback are unchanged. No view drawing code or snapshot scene changes are
+part of this stage. Shared stars, ratings, play counts, downloads across
+copies and Keep apart remain stage 3.
