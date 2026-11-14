@@ -1346,6 +1346,51 @@ fn source_scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
     reset(h, vec2(380.0, 880.0), Route::Recent);
     app_mut(h).edit_windows(|w| w.mode = WindowMode::Player);
     s.shoot(h, "sources-player");
+
+    // Last, since nothing undoes it: matching albums combined. Each source
+    // holds a copy of one of the other's albums.
+    reset(h, FULL, Route::Albums);
+    combined_copies(app_mut(h));
+    app_mut(h).actions.push(Action::OpenSettings(settings_page::Section::Sources));
+    s.shoot(h, "sources-combined-setting");
+
+    // A dot for each source with a copy, after the artist. Newest first
+    // brings both combined albums to the top.
+    reset(h, FULL, Route::Albums);
+    app_mut(h).ui.sort = AlbumSort::Added;
+    s.shoot(h, "sources-combined-albums");
+    app_mut(h).ui.sort = AlbumSort::Artist;
+
+    // Every song from both copies, a dot for each copy a song has, and the
+    // copies' formats under the facts.
+    let vanguard = accounts::ItemKey::new(crate::test_tracks::account(), album_id(0)).to_string();
+    reset(h, FULL, Route::Album(vanguard));
+    s.shoot(h, "sources-combined-album");
+
+    // By album, last first: Sunday at the Village Vanguard (songs on both,
+    // one only on each), then Kind of Blue (one disc on both, the bonus
+    // disc only on the folder).
+    reset(h, FULL, Route::Songs);
+    app_mut(h).ui.songs.sort = super::super::songs::Column::Album;
+    app_mut(h).ui.songs.descending = true;
+    s.shoot(h, "sources-combined-songs");
+
+    // Bill Evans Trio's albums under each source's heading, the combined
+    // one once, under the server's, where its lead is.
+    reset(h, FULL, Route::Artist { name: "Bill Evans Trio".into(), id: None });
+    s.shoot(h, "sources-combined-artist");
+
+    reset(h, FULL, Route::Albums);
+    app_mut(h).actions.push(Action::OpenPalette);
+    h.run_steps(2);
+    {
+        let app = app_mut(h);
+        if let (Some(p), Some(index)) = (app.ui.palette.as_mut(), app.search.index.as_mut()) {
+            p.state.query = "gloria".into();
+            p.refresh(index);
+        }
+    }
+    s.shoot(h, "sources-combined-search");
 }
 
 /// Settings with some set in managed.json (as the Home Manager module writes

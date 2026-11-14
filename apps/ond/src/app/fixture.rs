@@ -913,3 +913,44 @@ pub(super) fn two_sources(app: &mut OndApp) {
     app.project_sources();
     app.rebuild_search();
 }
+
+/// Over [`two_sources`], with Combine matching albums on: the folder also
+/// holds the server's Sunday at the Village Vanguard as MP3s, a song short
+/// and with a take the server lacks, and the server holds the first disc
+/// of the folder's Kind of Blue, so each is one album on both.
+pub(super) fn combined_copies(app: &mut OndApp) {
+    use crate::source::identity;
+    let (server, local) = (crate::test_tracks::account(), local_account());
+    let mp3 = |kbps: u32| {
+        move |mut t: Track| {
+            t.suffix = Some("mp3".into());
+            t.bit_rate_kbps = Some(kbps);
+            t.bit_depth = None;
+            t.sample_rate = Some(44_100);
+            t
+        }
+    };
+    let mut vanguard: Vec<Track> = vanguard().into_iter().filter(|t| t.track != Some(3)).map(mp3(320)).collect();
+    let take = track("vg-6".into(), 0, "Gloria's Step (Take 3)", "Bill Evans Trio", VANGUARD.len() as u32 + 1, 1, 361, Some("Scott LaFaro"), 0, 44_100);
+    vanguard.push(mp3(320)(take));
+    let blue: Vec<Track> = kind_of_blue().into_iter().filter(|t| t.disc == Some(1)).map(mp3(256)).collect();
+    for (account, i, mut tracks) in [(local, 0, vanguard), (server, 1, blue)] {
+        let mut a = album(i);
+        a.song_count = tracks.len() as u32;
+        a.duration_secs = tracks.iter().filter_map(|t| t.duration_secs).sum();
+        identity::album(account, &mut a);
+        app.art.preload(&a.id, cover(i));
+        tracks.iter_mut().for_each(|t| identity::track(account, t));
+        let data = app.multi.data.get_mut(&account).expect("a live source");
+        let mut albums = data.albums.to_vec();
+        albums.push(a);
+        data.set_albums(albums);
+        let mut all = data.tracks.all.to_vec();
+        all.extend(tracks);
+        data.set_tracks(crate::tracks::TrackSet::new(all));
+    }
+    app.prefs.edit(|s| s.combine_copies = true);
+    app.multi.projection = None;
+    app.project_sources();
+    app.rebuild_search();
+}
