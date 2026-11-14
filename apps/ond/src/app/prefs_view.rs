@@ -131,8 +131,8 @@ pub enum PrefsAction {
     /// The alphabet rail beside long lists.
     AlphaRail(bool),
     ArtistPhotos(bool),
-    /// The Sources row is added by the combined-album UI pass.
-    #[allow(dead_code)]
+    /// Show an album more than one source holds once, with every song
+    /// from each.
     CombineCopies(bool),
     /// The Sources control is added by the combined-album UI pass.
     #[allow(dead_code)]

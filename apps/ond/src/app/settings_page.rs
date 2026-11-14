@@ -815,7 +815,8 @@ impl OndApp {
     /// Every live source, each with its own state: syncing or scanning and
     /// how far, can't reach its server, signed out, folder missing, and the
     /// files a folder's last scan skipped. Under the list, a line for each
-    /// source that needs explaining.
+    /// source that needs explaining, then whether albums on more than one
+    /// source show once (which only means something with more than one).
     fn all_source_settings(&mut self, ui: &mut Ui) {
         use super::source_look::{Detail, describe};
         let t = Tokens::of(ui);
@@ -861,6 +862,11 @@ impl OndApp {
             ui.add_space(8.0);
             ui.add(egui::Label::new(egui::RichText::new(line).size(12.0).color(t.muted)).wrap());
         }
+        let combine = self.ui.prefs.combine_copies;
+        group(ui, "Albums", |ui| {
+            let hint = "Show an album that's on more than one source once, with every song from each.";
+            self.pref_switch(ui, "combine_copies", "Combine matching albums", hint, combine, PrefsAction::CombineCopies);
+        });
     }
 
     /// What a source in use says under its name: how far a sync or scan has
