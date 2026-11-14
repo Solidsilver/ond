@@ -81,6 +81,25 @@ pub fn mark_of<'m>(session: &Session, marks: &'m SourceMarks, id: &str) -> Optio
     marks.get(identity::account(id)?)
 }
 
+/// The dot for something from `account` that may come from outside the
+/// scope (the playing song): drawn whenever more than one source is
+/// configured, since the library on screen doesn't say where it's from.
+pub fn configured_dot(marks: &SourceMarks, account: AccountId) -> Option<SourceColor> {
+    marks.get(account).map(|m| m.color)
+}
+
+/// [`ViewCtx::playing_dot`], for what draws without a view (Mini). Every
+/// configured source has a live session (signed out or not), so "more than
+/// one configured" is more than one in the session; a configuration the
+/// session hasn't caught up with yet draws nothing.
+pub fn playing_dot(session: &Session, marks: &SourceMarks, player: &crate::player::Player, track: &library::Track) -> Option<SourceColor> {
+    if session.accounts.len() < 2 {
+        return None;
+    }
+    let queued = player.queue.current.as_ref().filter(|c| c.track.id == track.id).map(|c| c.key.account);
+    configured_dot(marks, queued.or_else(|| identity::account(&track.id))?)
+}
+
 /// Whether the items `ids` come from more than one source. Compares the
 /// account part of each id as text, so a long list costs no parsing.
 pub fn spans<'i>(mut ids: impl Iterator<Item = &'i str>) -> bool {
@@ -188,6 +207,42 @@ impl ViewCtx<'_> {
     /// Source column.
     pub fn mixed_sources(&self) -> bool {
         mixed(self.session)
+    }
+
+    /// The dots for a playlist, while the library mixes sources: its
+    /// server's, or for one of Ond's own, those of the sources it holds
+    /// songs from, in the sources' order.
+    pub fn playlist_dots(&self, p: &crate::source::Playlist) -> Vec<SourceColor> {
+        if !mixed(self.session) {
+            return Vec::new();
+        }
+        let marks = &self.ui.prefs.sources;
+        if let Some(account) = identity::account(&p.id) {
+            return marks.get(account).map(|m| m.color).into_iter().collect();
+        }
+        let Some(tracks) = self.data.playlist_tracks.get(&p.id) else { return Vec::new() };
+        // Each song's account as text, once each, before any is parsed.
+        let mut seen: Vec<&str> = Vec::new();
+        for t in tracks.iter() {
+            if let Some((a, _)) = t.id.split_once('/')
+                && !seen.contains(&a)
+            {
+                seen.push(a);
+            }
+        }
+        let held: Vec<AccountId> = seen.iter().filter_map(|a| a.parse().ok()).collect();
+        marks.iter().filter(|m| held.contains(&m.id)).map(|m| m.color).collect()
+    }
+
+    /// The dot for the song `track` playing, whenever more than one source
+    /// is configured: it may come from outside the scope.
+    pub fn playing_dot(&self, track: &library::Track) -> Option<SourceColor> {
+        playing_dot(self.session, &self.ui.prefs.sources, self.player, track)
+    }
+
+    /// The dot for the queue's `item`, while the library mixes sources.
+    pub fn queue_dot(&self, item: &crate::queue::Item) -> Option<SourceColor> {
+        mixed(self.session).then(|| configured_dot(&self.ui.prefs.sources, item.key.account)).flatten()
     }
 
     /// Whether a list of `tracks` shows its Source column: the library mixes

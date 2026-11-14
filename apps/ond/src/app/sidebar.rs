@@ -515,7 +515,8 @@ impl ViewCtx<'_> {
             // Downloaded (or on its way): only when the source downloads.
             let mark =
                 self.session.caps().downloads.then(|| super::offline_page::pin_mark(self.downloads.snap.pin(&offline::Pin::Playlist(p.id.clone())))).flatten();
-            let resp = place(ui, &p.name, active == Some(i), mark);
+            let dots = self.playlist_dots(p);
+            let resp = if dots.is_empty() { place(ui, &p.name, active == Some(i), mark) } else { place_with_dots(ui, &p.name, active == Some(i), mark, &dots) };
             // A drop target for songs dragged from any list.
             if mine && dragging {
                 let over = resp.dnd_hover_payload::<DragTracks>().is_some_and(|d| d.from.as_ref().is_none_or(|(from, _)| *from != p.id));
@@ -603,6 +604,34 @@ fn place(ui: &mut Ui, label: &str, on: bool, mark: Option<super::offline_page::M
         && ui.is_rect_visible(resp.rect)
     {
         super::offline_page::mark(ui, pos2(resp.rect.right() - 8.0 - MARK_ROOM / 2.0 + 4.0, resp.rect.center().y), 11.0, m);
+    }
+    resp
+}
+
+/// [`place`] for a playlist while sources are mixed: the dots of the
+/// sources it holds songs from at the row's end, before its download mark.
+fn place_with_dots(ui: &mut Ui, label: &str, on: bool, mark: Option<super::offline_page::Mark>, dots: &[accounts::SourceColor]) -> egui::Response {
+    let t = Tokens::of(ui);
+    let mark_room = if mark.is_some() { MARK_ROOM } else { 0.0 };
+    let dots_w = shell::kit::source_dots_width(dots.len());
+    let name = match mark {
+        Some(m) => format!("{label}, {}", m.hint().to_lowercase()),
+        None => label.to_owned(),
+    };
+    let resp = crate::widgets::sidebar_row(ui, label, on, mark_room + dots_w + 10.0, &name);
+    if ui.is_rect_visible(resp.rect) {
+        let ground = if on {
+            t.selected
+        } else if resp.hovered() {
+            t.hover
+        } else {
+            t.sidebar
+        };
+        let right = resp.rect.right() - 8.0 - mark_room;
+        shell::kit::source_dots(ui, pos2(right - dots_w / 2.0, resp.rect.center().y), dots, ground);
+        if let Some(m) = mark {
+            super::offline_page::mark(ui, pos2(resp.rect.right() - 8.0 - MARK_ROOM / 2.0 + 4.0, resp.rect.center().y), 11.0, m);
+        }
     }
     resp
 }

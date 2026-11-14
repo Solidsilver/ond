@@ -25,7 +25,21 @@ impl ViewCtx<'_> {
         }
         scroll.show(ui, |ui| {
             for playlist in &self.data.playlists {
-                if ui.button(&playlist.name).clicked() {
+                let dots = self.playlist_dots(playlist);
+                let clicked = if dots.is_empty() {
+                    ui.button(&playlist.name).clicked()
+                } else {
+                    // The sources it holds songs from follow its name.
+                    ui.horizontal(|ui| {
+                        let clicked = ui.button(&playlist.name).clicked();
+                        let w = shell::kit::source_dots_width(dots.len());
+                        let (r, _) = ui.allocate_exact_size(vec2(w, ui.spacing().interact_size.y), Sense::hover());
+                        shell::kit::source_dots(ui, r.center(), &dots, ui.visuals().panel_fill);
+                        clicked
+                    })
+                    .inner
+                };
+                if clicked {
                     self.actions.push(Action::Go(crate::nav::Route::Playlist { id: playlist.id.clone(), name: playlist.name.clone() }));
                 }
             }

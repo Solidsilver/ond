@@ -110,10 +110,21 @@ impl OndApp {
         let inner = panel.shrink2(vec2(14.0, 10.0));
         if let Some(item) = &self.player.queue.current {
             let title = elide(&ui, &item.track.title, FontId::new(13.0, semibold()), ON_ART, inner.width());
-            let artist = elide(&ui, item.track.artist.as_deref().unwrap_or(""), FontId::proportional(11.5), ON_ART_MUTED, inner.width());
             let title_h = title.size().y;
             ui.painter().galley(pos2(inner.left(), inner.top()), title, ON_ART);
-            ui.painter().galley(pos2(inner.left(), inner.top() + title_h + 1.0), artist, ON_ART_MUTED);
+            let artist = (item.track.artist.as_deref().unwrap_or(""), FontId::proportional(11.5), ON_ART_MUTED);
+            let at = pos2(inner.left(), inner.top() + title_h + 1.0);
+            // Where it comes from follows the artist, small, whenever there's
+            // more than one source.
+            match super::source_look::playing_dot(&self.session, &self.ui.prefs.sources, &self.player, &item.track) {
+                Some(color) => {
+                    shell::kit::text_then_dots(&ui, at, artist, inner.width(), &[color], scrim());
+                }
+                None => {
+                    let artist = elide(&ui, artist.0, artist.1, artist.2, inner.width());
+                    ui.painter().galley(at, artist, ON_ART_MUTED);
+                }
+            }
         }
         // The seek bar, inset from every edge, with the times at its ends.
         let seek_y = inner.top() + PANEL_SEEK_Y;

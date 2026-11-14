@@ -203,13 +203,22 @@ impl ViewCtx<'_> {
             let sep_w = if track.artist.is_some() && album.is_some() { natural(ui, sep) } else { 0.0 };
             let artist_w = track.artist.as_deref().map_or(0.0, |a| natural(ui, a));
             let album_w = album.map_or(0.0, |al| natural(ui, &al.name));
-            let room = width - sep_w;
+            // Where it comes from follows the artist, whenever there's more
+            // than one source.
+            let dot = self.playing_dot(track);
+            let dot_w = if dot.is_some() { shell::kit::DOT_TRAIL } else { 0.0 };
+            let room = width - sep_w - dot_w;
             let artist_max = if artist_w + album_w <= room { artist_w } else { artist_w.min((room - album_w).max(room * 0.5)) };
             if let Some(artist) = &track.artist
                 && link_line(ui, artist, font.clone(), t.accent, artist_max).clicked()
                 && let Some(route) = Route::artist_of(track)
             {
                 self.actions.push(Action::Go(route));
+            }
+            if let Some(color) = dot {
+                let h = ui.painter().layout_no_wrap("A".into(), font.clone(), t.text).size().y;
+                let (r, _) = ui.allocate_exact_size(vec2(dot_w, h), Sense::hover());
+                shell::kit::source_dot_after(ui, r.left(), r.center().y, color);
             }
             if let Some(al) = album {
                 if track.artist.is_some() {

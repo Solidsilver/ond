@@ -221,7 +221,8 @@ impl ViewCtx<'_> {
         // The titles keep clear of the seek line's knob, or the waveform's bars.
         let reach = if self.ui.prefs.waveform { LCD_WAVE_H } else { LCD_KNOB_R };
         let floor = rect.bottom() - LCD_SEEK_INSET - reach - 1.0;
-        let sub_text = lcd_titles(ui, &painter, &t, rect.with_max_y(floor), col_left..=col_right, &item.track, album);
+        let dot = self.playing_dot(&item.track);
+        let sub_text = lcd_titles(ui, &painter, &t, rect.with_max_y(floor), col_left..=col_right, (&item.track, album), dot);
         let strip_resp = self.lcd_seek(ui, &painter, &t, rect, seek_left..=seek_right);
 
         let hovering = body.hovered() || strip_resp.hovered() || self.ui.seek_preview.is_some();
@@ -318,15 +319,17 @@ impl ViewCtx<'_> {
 /// The display's title over "artist · album": centred on the display when
 /// the same margin fits on both sides, else centred in the middle column
 /// (`cols`, left to right), within `rect` (the display down to the seek
-/// line). Returns the second line's text.
+/// line). The playing song's source's dot (`dot`, with more than one
+/// source) follows the second line, centred with it. Returns the second
+/// line's text.
 fn lcd_titles(
     ui: &Ui,
     painter: &egui::Painter,
     t: &Tokens,
     rect: Rect,
     cols: std::ops::RangeInclusive<f32>,
-    track: &library::Track,
-    album: Option<&library::Album>,
+    (track, album): (&library::Track, Option<&library::Album>),
+    dot: Option<accounts::SourceColor>,
 ) -> String {
     let (col_left, col_right) = (*cols.start(), *cols.end());
     let reserve = (col_left - rect.left()).max(rect.right() - col_right);
@@ -339,10 +342,16 @@ fn lcd_titles(
         (None, Some(al)) => al.name.clone(),
         _ => String::new(),
     };
-    let sub = elide(ui, &sub_text, FontId::proportional(11.0), t.muted, text_w);
+    let dot_w = if dot.is_some() { shell::kit::DOT_TRAIL } else { 0.0 };
+    let sub = elide(ui, &sub_text, FontId::proportional(11.0), t.muted, text_w - dot_w);
     let (y0, sub_y) = lcd_title_rows(rect.top(), rect.bottom(), title.size().y, sub.size().y);
     painter.galley(pos2(center_x - title.size().x / 2.0, y0), title, t.text);
-    painter.galley(pos2(center_x - sub.size().x / 2.0, sub_y), sub, t.muted);
+    let sub_x = center_x - (sub.size().x + dot_w) / 2.0;
+    let (sub_w, sub_h) = (sub.size().x, sub.size().y);
+    painter.galley(pos2(sub_x, sub_y), sub, t.muted);
+    if let Some(color) = dot {
+        shell::kit::source_dot_after(ui, sub_x + sub_w, sub_y + sub_h / 2.0, color);
+    }
     sub_text
 }
 
