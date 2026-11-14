@@ -180,6 +180,8 @@ fn m3u_export_formats_resolved_tracks_and_sanitizes_newlines() {
 
 #[test]
 fn golden_postcard_bytes_stay_readable_across_builds() {
+    assert_eq!(encode(&ApartV1 { kept_at: 42 }).unwrap(), [0x54]);
+    assert_eq!(decode::<ApartV1>(&[0x54]).unwrap(), ApartV1 { kept_at: 42 });
     let star_bytes = [0x01, 0x04, b'B', b'i', b'l', b'l', 0x54];
     let rating_bytes = [0x05, 0x14];
     let pl_bytes = [2, b'p', b'1', 3, b'M', b'i', b'x', 1, 1, b'a', 2, b't', b'1', 2, 4];
@@ -223,6 +225,8 @@ fn golden_postcard_bytes_stay_readable_across_builds() {
     }
 
     let store = OndStore::open(&path).unwrap();
+    assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
+    assert!(store.apart_pairs().unwrap().is_empty());
     assert_eq!(store.starred(a).unwrap().artists, vec![("ar-1".to_owned(), Some("Bill".to_owned()))]);
     assert_eq!(store.rating(&ItemKey::new(a, "s-1")).unwrap(), 5);
     let pl = store.playlist("pl-1").unwrap().unwrap();

@@ -12,7 +12,7 @@ mod tests;
 
 use crate::source::StarKind;
 use accounts::{AccountId, ItemKey};
-use model::{PlaylistEntryV1, PlaylistV1, RatingV1, StarredV1};
+use model::{ApartV1, PlaylistEntryV1, PlaylistV1, RatingV1, StarredV1};
 use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition, WriteTransaction};
 use scan::TrackMove;
 use serde::{Serialize, de::DeserializeOwned};
@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Bump when a row layout or table changes, and handle the step in `migrate`.
-pub(crate) const SCHEMA_VERSION: u32 = 1;
+pub(crate) const SCHEMA_VERSION: u32 = 2;
 
 const META: TableDefinition<&str, u32> = TableDefinition::new("meta");
 /// `(account_uuid, kind_tag, item_id)` -> `StarredV1` postcard bytes.
@@ -30,6 +30,14 @@ const STARS: TableDefinition<(&str, u8, &str), &[u8]> = TableDefinition::new("st
 const RATINGS: TableDefinition<(&str, &str), &[u8]> = TableDefinition::new("ratings");
 /// `playlist_id` -> `PlaylistV1` postcard bytes.
 const PLAYLISTS: TableDefinition<&str, &[u8]> = TableDefinition::new("playlists");
+/// Ordered canonical album ItemKeys -> `ApartV1` postcard bytes.
+const APART: TableDefinition<(&str, &str), &[u8]> = TableDefinition::new("album_apart_v1");
+
+pub type ApartPairs = std::collections::BTreeSet<(ItemKey, ItemKey)>;
+
+pub fn album_pair(a: ItemKey, b: ItemKey) -> (ItemKey, ItemKey) {
+    if a < b { (a, b) } else { (b, a) }
+}
 
 const SCHEMA_KEY: &str = "schema_version";
 
@@ -170,6 +178,7 @@ impl OndStore {
             wt.open_table(STARS)?;
             wt.open_table(RATINGS)?;
             wt.open_table(PLAYLISTS)?;
+            wt.open_table(APART)?;
         }
         wt.commit()?;
         Ok(Self { db })
@@ -179,6 +188,46 @@ impl OndStore {
     pub fn schema_version(&self) -> Result<u32> {
         let rt = self.db.begin_read()?;
         Ok(rt.open_table(META)?.get(SCHEMA_KEY)?.map_or(0, |v| v.value()))
+    }
+
+    pub fn apart_pairs(&self) -> Result<ApartPairs> {
+        let rt = self.db.begin_read()?;
+        let mut pairs = ApartPairs::new();
+        for row in rt.open_table(APART)?.iter()? {
+            let (keys, bytes) = row?;
+            let _: ApartV1 = decode(bytes.value())?;
+            let (a, b) = keys.value();
+            if let (Ok(a), Ok(b)) = (ItemKey::parse(a), ItemKey::parse(b)) {
+                pairs.insert(album_pair(a, b));
+            }
+        }
+        Ok(pairs)
+    }
+
+    /// Keeps only explicitly requested pairs apart, in one transaction.
+    pub fn keep_apart(&self, pairs: &ApartPairs) -> Result<()> {
+        let wt = self.db.begin_write()?;
+        {
+            let mut table = wt.open_table(APART)?;
+            let bytes = encode(&ApartV1 { kept_at: now_secs() })?;
+            for (a, b) in pairs {
+                if a.account != b.account {
+                    let (a, b) = album_pair(a.clone(), b.clone());
+                    table.insert((a.to_string().as_str(), b.to_string().as_str()), bytes.as_slice())?;
+                }
+            }
+        }
+        Ok(wt.commit()?)
+    }
+
+    /// Either album can undo its exclusions, including absent copies.
+    pub fn combine_again(&self, album: &ItemKey) -> Result<()> {
+        let wt = self.db.begin_write()?;
+        {
+            let spelling = album.to_string();
+            wt.open_table(APART)?.retain(|(a, b), _| a != spelling && b != spelling)?;
+        }
+        Ok(wt.commit()?)
     }
 
     /// Loves or unloves `key` as `kind` (`name` is kept for artist stars).
@@ -541,10 +590,15 @@ fn set_aside(path: &Path) -> Result<PathBuf> {
     Ok(dest)
 }
 
-fn migrate(_wt: &WriteTransaction, from: u32, to: u32) -> Result<()> {
-    // Schema v1 is the first schema; future versions add migration steps here.
-    if from < to {
-        return Err(Error::NoMigration { from });
+fn migrate(wt: &WriteTransaction, mut from: u32, to: u32) -> Result<()> {
+    while from < to {
+        match from {
+            1 => {
+                wt.open_table(APART)?;
+            }
+            _ => return Err(Error::NoMigration { from }),
+        }
+        from += 1;
     }
     Ok(())
 }

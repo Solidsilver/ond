@@ -283,6 +283,12 @@ pub enum Action {
     Offline(OfflineAction),
     /// Library analysis.
     Analysis(AnalysisAction),
+    /// Split a combined album into its copies; the menu is added by the UI pass.
+    #[allow(dead_code)]
+    KeepApart(String),
+    /// Clear the stored exclusions involving this account-qualified album.
+    #[allow(dead_code)]
+    CombineAgain(String),
     /// Love or unlove a song, album or artist. `track` / `name` keep the
     /// Favorites view current.
     ToggleStar {
@@ -476,6 +482,12 @@ impl OndApp {
                 Arc::new(crate::store::OndStore::in_memory()?)
             }
         };
+        let apart_pairs = ond_store.apart_pairs().unwrap_or_else(|e| {
+            notices.push(format!("Ond couldn't read its album separation choices ({e})."));
+            Default::default()
+        });
+        let mut multi = all_sources::AllSources::default();
+        multi.apart_pairs = apart_pairs;
         let analyses = stores.analyses;
         let (tx, inbox) = channel();
         let repaint = ctx.clone();
@@ -575,7 +587,7 @@ impl OndApp {
             onboarding,
             session: Session::new(prefs.has_login().then(|| saved.clone()), connecting, work_offline),
             data: Data::default(),
-            multi: Default::default(),
+            multi,
             actions: Vec::new(),
             pending: Vec::new(),
             art,
@@ -609,6 +621,10 @@ impl OndApp {
 
     fn handle(&mut self, msg: impl Into<Msg>) {
         match msg.into() {
+            Msg::CopySeparation(pairs) => {
+                self.multi.apart_pairs = pairs;
+                self.project_sources();
+            }
             Msg::OndPlaylistChanged => self.refresh_ond_playlists(),
             Msg::MixedPlaylistReady { id, name, existing, added } => self.offer_mixed_playlist(id, name, existing, added),
             Msg::OndPlaylists { generation, playlists, tracks, entries } => self.ond_playlists_loaded(generation, playlists, tracks, entries),
@@ -885,6 +901,12 @@ impl OndApp {
             Action::Output(a) => self.apply_output(a),
             Action::Offline(a) => self.apply_offline(a),
             Action::Analysis(a) => self.apply_analysis(a),
+            Action::KeepApart(id) => self.keep_copies_apart(&id),
+            Action::CombineAgain(id) => {
+                if let Ok(key) = accounts::ItemKey::parse(&id) {
+                    self.bridge.separate_copies(Default::default(), Some(key));
+                }
+            }
             Action::ToggleStar { kind, id, track, name } => self.toggle_star(kind, id, track.map(|t| *t), name),
             Action::Rate(id, rating) => self.rate(id, rating),
             Action::Command(cmd) => self.command(cmd),

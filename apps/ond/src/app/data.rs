@@ -50,6 +50,8 @@ pub struct Data {
     pub recording_mbids: HashMap<String, String>,
     pub mbids_version: u64,
     combined_versions: Option<CopyVersions>,
+    pub apart_pairs: crate::store::ApartPairs,
+    combined_apart: crate::store::ApartPairs,
     /// Only combined groups; singleton accessors return the item itself.
     pub album_copies: HashMap<String, Vec<accounts::ItemKey>>,
     pub track_copies: HashMap<String, Vec<accounts::ItemKey>>,
@@ -98,7 +100,7 @@ impl Data {
         let combine = combine && sources.len() > 1;
         let copy_versions: CopyVersions =
             sources.iter().map(|d| (d.account, d.version, d.tracks_version, d.artists_version, d.mbids_version, d.lists_version)).collect();
-        let copies_changed = self.combined_versions.as_ref().is_none_or(|v| v != &copy_versions);
+        let copies_changed = self.combined_versions.as_ref().is_none_or(|v| v != &copy_versions) || self.combined_apart != self.apart_pairs;
         let reset = self.combined_versions.is_some() && (!combine || copies_changed) || combine && copies_changed;
         if reset {
             self.album_copies.clear();
@@ -165,6 +167,7 @@ impl Data {
             self.combine_copies(sources);
         }
         self.combined_versions = combine.then_some(copy_versions);
+        self.combined_apart = self.apart_pairs.clone();
     }
 
     pub(super) fn artist_catalog(sources: &[&Data]) -> Vec<crate::source::artists::MergedArtist> {

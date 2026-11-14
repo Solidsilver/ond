@@ -28,7 +28,12 @@ fn mbid(id: Option<&str>) -> Option<String> {
 }
 
 /// Indices into `albums`, lead first. Year and completeness aren't identity.
+#[cfg(test)]
 pub fn albums(albums: &[AlbumIdentity]) -> Vec<Vec<usize>> {
+    albums_apart(albums, &crate::store::ApartPairs::new())
+}
+
+pub fn albums_apart(albums: &[AlbumIdentity], apart: &crate::store::ApartPairs) -> Vec<Vec<usize>> {
     let ids: Vec<_> = albums.iter().map(|a| mbid(a.release.as_deref())).collect();
     let names: Vec<_> = albums.iter().map(|a| (a.artist.clone(), normalize_name(&a.title))).collect();
     let mut order: Vec<_> = (0..albums.len()).collect();
@@ -41,6 +46,7 @@ pub fn albums(albums: &[AlbumIdentity]) -> Vec<Vec<usize>> {
         let found = candidates.copied().find(|&g| {
             groups[g].iter().all(|&j| {
                 albums[i].key.account != albums[j].key.account
+                    && !apart.contains(&crate::store::album_pair(albums[i].key.clone(), albums[j].key.clone()))
                     && match (&ids[i], &ids[j]) {
                         (Some(a), Some(b)) => a == b,
                         _ => names[i] == names[j],

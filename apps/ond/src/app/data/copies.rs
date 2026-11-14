@@ -93,7 +93,7 @@ impl Data {
         self.copy_albums = albums.iter().map(|a| (a.id.clone(), (*a).clone())).collect();
         let mut visible_albums: Vec<Album> = loose.iter().map(|a| (*a).clone()).collect();
         let mut visible_tracks: Vec<Track> = loose.iter().filter_map(|a| originals.album(&a.id)).flat_map(|s| s.iter().cloned()).collect();
-        for group in copies::albums(&identities) {
+        for group in copies::albums_apart(&identities, &self.apart_pairs) {
             let mut album = albums[group[0]].clone();
             if group.len() == 1 {
                 if let Some(songs) = originals.album(&album.id) {

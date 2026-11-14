@@ -28,6 +28,7 @@ pub(super) struct AllSources {
     pub(super) projection: Option<Vec<(AccountId, u64)>>,
     scope: Scope,
     combine_copies: bool,
+    pub apart_pairs: crate::store::ApartPairs,
 }
 
 #[derive(Debug, Clone)]
@@ -293,7 +294,11 @@ impl OndApp {
             self.multi.data.keys().copied().collect()
         };
         let key: Vec<_> = accounts.into_iter().filter(|a| scope.includes(*a)).map(|a| (a, self.multi.revisions.get(&a).copied().unwrap_or_default())).collect();
-        if self.multi.projection.as_ref() == Some(&key) && self.multi.scope == scope && self.multi.combine_copies == combine {
+        if self.multi.projection.as_ref() == Some(&key)
+            && self.multi.scope == scope
+            && self.multi.combine_copies == combine
+            && self.data.apart_pairs == self.multi.apart_pairs
+        {
             return;
         }
         let route_copies = match self.ui.nav.current() {
@@ -301,6 +306,7 @@ impl OndApp {
             _ => Vec::new(),
         };
         let sources: Vec<&Data> = key.iter().map(|(a, _)| &self.multi.data[a]).collect();
+        self.data.apart_pairs = self.multi.apart_pairs.clone();
         self.data.merge_sources(&sources, combine);
         if let Some(lead) = route_copies.iter().map(ToString::to_string).map(|id| self.data.album_lead(&id).to_owned()).find(|id| self.data.album(id).is_some())
         {
@@ -362,6 +368,17 @@ impl OndApp {
         self.ui.reveal = None;
         self.ui.palette = None;
         self.on_arrive();
+    }
+
+    pub(super) fn keep_copies_apart(&self, id: &str) {
+        let copies = self.data.copies_of_album(id);
+        let mut pairs = crate::store::ApartPairs::new();
+        for (i, a) in copies.iter().enumerate() {
+            for b in &copies[i + 1..] {
+                pairs.insert(crate::store::album_pair(a.clone(), b.clone()));
+            }
+        }
+        self.bridge.separate_copies(pairs, None);
     }
 
     fn scope_section_to_top(&self, route: &Route) {
@@ -2265,5 +2282,38 @@ mod tests {
         app.session.work_offline = true;
         app.session.accounts.get_mut(&account(1)).unwrap().online = false;
         assert_eq!(add_copy(&mut app, account(2)), account(1));
+    }
+    #[test]
+    fn keeping_a_pair_apart_survives_restart_without_excluding_a_third_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let one = server();
+        let two = server();
+        {
+            let mut app = copy_playback_rig(dir.path(), &one, &two);
+            let generation = app.search.generation;
+            app.apply(Action::KeepApart(key(account(1), "1")));
+            pump(&mut app, |a| a.data.albums.len() == 2);
+            assert!(app.search.generation > generation);
+            inject_copy(&mut app, account(1), "Record", Some("release"), &[1]);
+            assert_eq!(app.data.albums.len(), 2, "sync does not discard an exclusion");
+        }
+        let mut app = copy_playback_rig(dir.path(), &one, &two);
+        assert_eq!(app.data.albums.len(), 2);
+        let third = account(3);
+        let library = Arc::new(library::Library::in_memory().unwrap());
+        let bridge = app.bridge.fork_source(third, library);
+        app.multi.bridges.insert(third, bridge);
+        app.prefs.edit(|s| s.sources.push(SourceEntry::subsonic(third, one.base(), "me")));
+        inject_copy(&mut app, third, "Record", Some("release"), &[1]);
+        assert_eq!(app.data.albums.len(), 2);
+        assert_eq!(app.data.copies_of_album(&key(account(1), "1")).iter().map(|k| k.account).collect::<Vec<_>>(), [account(1), third]);
+        assert_eq!(app.data.copies_of_album(&key(account(2), "1")).len(), 1);
+        combine(&mut app, false);
+        assert_eq!(app.data.albums.len(), 3);
+        combine(&mut app, true);
+        assert_eq!(app.data.albums.len(), 2);
+        app.apply(Action::CombineAgain(key(account(2), "1")));
+        pump(&mut app, |a| a.data.albums.len() == 1);
+        assert!(app.bridge.ond_store().apart_pairs().unwrap().is_empty());
     }
 }

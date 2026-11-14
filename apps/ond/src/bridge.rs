@@ -28,6 +28,7 @@ pub struct OndPlaylistEntries {
 /// that part's handler matches its own group whole, so a message added to a
 /// group can't be left unhandled.
 pub enum Msg {
+    CopySeparation(crate::store::ApartPairs),
     OndPlaylistChanged,
     MixedPlaylistReady {
         id: String,
@@ -1421,6 +1422,28 @@ impl Bridge {
     /// Ond's cross-source store for hearts, ratings and playlists.
     pub fn ond_store(&self) -> &Arc<crate::store::OndStore> {
         &self.ond_store
+    }
+
+    /// Album exclusions belong to this installation, across source sessions.
+    /// Serializing writes also keeps a rapid Keep apart / Combine again ordered.
+    pub fn separate_copies(&self, pairs: crate::store::ApartPairs, combine: Option<accounts::ItemKey>) {
+        let store = self.ond_store.clone();
+        let post = self.poster();
+        self.after_previous("copy-separation".into(), async move {
+            let result = tokio::task::spawn_blocking(move || {
+                match combine {
+                    Some(key) => store.combine_again(&key)?,
+                    None => store.keep_apart(&pairs)?,
+                }
+                store.apart_pairs()
+            })
+            .await;
+            match result {
+                Ok(Ok(pairs)) => post(Msg::CopySeparation(pairs)),
+                Ok(Err(e)) => post(Msg::Error(Failure::Local(format!("Couldn't save album separation: {e}")))),
+                Err(e) => post(Msg::Error(Failure::Local(format!("Couldn't save album separation: {e}")))),
+            }
+        });
     }
 
     pub fn open_playlist(&self, source: Option<Src>, id: String) {
