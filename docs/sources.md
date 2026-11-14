@@ -15,7 +15,7 @@ Ond plays from one Navidrome server. This design makes the server one **source**
 
 ## Not now
 
-- Merging the same album from two sources into one. Version 1 shows both, each marked with its source (see [Matching albums](#matching-albums-later)).
+- Merging the same album from two sources into one. Milestone 4 shows both, each marked with its source; milestone 5 combines them as an option (see [Combined albums](#combined-albums-milestone-5)).
 - Writing tags or moving files in a local folder. Ond reads a folder; it doesn't manage it.
 - Syncing Ond's own playlists or favourites back to a server that doesn't hold the tracks.
 - Jellyfin and Plex themselves. The trait is shaped so they fit; [Later sources](#later-sources) says what each would need.
@@ -158,9 +158,21 @@ The sidebar's switcher sets the `Scope`: one source, or All sources.
 
 Moving between scopes keeps the page you're on when it exists in the new one (an artist page stays an artist page); otherwise it goes to the same place (Albums, Songs) at the top.
 
-### Matching albums (later)
+### Combined albums (milestone 5)
 
-The same album on two sources shows twice in version 1. Merging them needs answers this design leaves open: which copy plays (the local one, the better format, the one that's online), whose star counts, and what happens when the track lists differ. The likely shape is a match on the MusicBrainz release id, falling back to album artist, title and track count, with a preference order the user sets per source. It's left until people have used version 1.
+The same album on two sources shows twice in milestone 4. With **Combine matching albums** on (Settings › Sources, off by default, a `combine_copies` setting Home Manager may manage), views that show more than one source treat copies as one album and one song.
+
+**Matching albums.** Two albums from different sources are one when both have a MusicBrainz release id and the ids are equal. When either lacks one, they match on their merged artist (the artist groups above) and their normalised title (the same folding as artist names). Different release ids never match, and neither do two albums from the same source. Year and track count are ignored: rips of one album often disagree on the year, and a partial copy should still join the full one. Editions stay apart when their titles differ ("Deluxe", "Live"), since the title is compared whole. A user can keep two albums apart (stage 3), and that choice outlives syncs.
+
+**Matching songs.** Within a combined album, two songs are one when both have a MusicBrainz recording id and the ids are equal. Otherwise they match on disc and track number together with their normalised title, or on the title alone when the song has no number and only one song on the album has that title. A song only one source has stays a song of its own. The album's track list is the union of every copy's, in disc and track order.
+
+**Identity.** Nothing new is stored as a key. A combined album or song is addressed by one member's real `ItemKey`, its *lead*: the member from the first source in settings order. `Data` keeps the copies beside it (`album_copies` and `track_copies`, from a lead key to every member key, the lead first, in source order), so routes, selections, the queue, playlists and pins all keep holding ordinary keys, and turning the switch off loses nothing. Frozen postcard rows are unchanged. Chips and a one-source scope narrow the copies first: a combined album with one copy left in scope is just that copy.
+
+**On screen.** A combined album has one card with a dot for each source that has a copy, and its formats on its page ("FLAC · MP3", from the tracks' suffixes). A combined song has one row with a dot for each copy. The Source column lists them all. Artists count a combined album once.
+
+**Which copy plays (stage 2).** A combined song plays its *preferred* copy: among copies whose source is reachable, by the **Prefer** setting: *Best quality* (lossless before lossy, then the higher bitrate, then source order) or *Source order* (settings order; the default). If the preferred copy fails to start because its source is unreachable or the file is gone, the player moves to the next copy of that song before skipping. This applies to anything queued from a combined view and to playlist entries whose song has copies.
+
+**Stars, ratings and downloads (stage 3).** A combined song shows as starred when any copy is. Starring it stars every copy (on each server that holds stars, in Ond for the rest), and unstarring clears every copy. A rating is shown from the preferred copy and set on every copy. Play counts shown are the sum. Downloading a combined song pins its preferred copy, and a combined album counts as downloaded when every song has a pinned copy. **Keep apart** on a combined album's menu splits it back into its copies and stores the pair in `ond.redb` (account-qualified album keys), and **Combine again** on either copy undoes it.
 
 ## Shared UI
 
@@ -231,7 +243,8 @@ The `sources` list in `settings.json` arrives with the second kind of source (mi
 2. **The shared kit.** `kit::form`, onboarding, the switcher, dots, chips and Sources rows, in both apps. Rede now holds and switches between multiple Audiobookshelf accounts via `kit::source_switcher` (one active account at a time via `Scope::only(id)`, assigning a `SourceColor` per account, reusing an existing `(server, username)` on re-sign-in, keeping signed-out rows in the list, and flushing pending progress on switch; merged "All sources" views belong to milestone 4). Done when both apps sign in through `kit::onboarding` and both sidebars draw `kit::source_switcher`.
 3. **Local folders.** The `scan` crate and the local source, Ond's own favourites and playlists. Done when a first run can choose a folder instead of a server and play from it with no network.
 4. **All sources.** The merged views, merged artists, filter chips, scope-aware search, Ond playlists that mix sources. Built, UI included. Done when a Navidrome source and a local one show as one library, and switching scope keeps your place.
-5. **Later:** album matching; direct scrobbling for local tracks; Jellyfin; Plex.
+5. **Combined albums** (see "Combined albums" above), in three stages. Stage 1: matching albums and songs, the setting, and the combined views with dots and formats. Stage 2: the preferred copy and falling back to another copy. Stage 3: stars, ratings and play counts across copies, downloads, and Keep apart. Done when the same album on two servers shows as one album whose songs are the union of both, and pulling one server's network cable leaves it playable.
+6. **Later:** direct scrobbling for local tracks; Jellyfin; Plex.
 
 ## Ond backend handoff (milestone 4)
 
