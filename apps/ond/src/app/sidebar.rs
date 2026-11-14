@@ -207,7 +207,7 @@ impl OndApp {
             sources: &sources,
             scope: &scope,
             look: kit::SwitcherLook::Line,
-            add: false,
+            add: !self.prefs.managed("sources"),
             manage: true,
             toggles: false,
             tooltip: Some(&tooltip),
@@ -215,6 +215,9 @@ impl OndApp {
         let picked = kit::source_switcher(ui, &switcher, place, |ui| self.server_menu(ui, &state));
         if picked == Some(kit::SourcePick::Manage) {
             return self.actions.push(Action::OpenSettings(super::settings_page::Section::Sources));
+        }
+        if picked == Some(kit::SourcePick::Add) {
+            return self.actions.push(Action::Onboarding(kit::OnboardingEvent::AddAnother));
         }
         let Some(kit::SourcePick::App(row)) = picked else { return };
         self.actions.push(match row {

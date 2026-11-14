@@ -5,8 +5,10 @@
 //! (`session`); once the server answers, the sheet closes on the library.
 //! Picking a folder shows the folder form (`sources`); once its first scan
 //! has run (or the user carries on without waiting), the sheet closes on it.
-//! Ond holds one source live at a time, so there's no Add another and no
-//! step that would only say Done.
+//! Add source… (in the sidebar's menu and Settings › Sources) opens the
+//! same sheet over the library, on the kinds with Cancel; a source added
+//! there joins the others rather than replacing them. There's no step
+//! that would only say Done.
 //!
 //! The login form opened on its own, to sign in again over the library, is
 //! drawn in the same sheet, on the form with no way back to the tiles.

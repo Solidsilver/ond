@@ -723,9 +723,9 @@ impl OndApp {
     }
 
     /// Every configured source, the one in use first: its name and colour,
-    /// its sync word, Sign out… for a server and Remove… for a folder. The
-    /// others are listed as not in use (Ond plays from one at a time). A
-    /// folder source in use shows its folders under the list, to add to or
+    /// its sync word, Sign out… for a server and Remove… for a folder, then
+    /// Add source…. Sources configured but not yet live are listed as not
+    /// in use. A folder source in use shows its folders under the list, to add to or
     /// take from, and how its last scan went. One set in managed.json is
     /// locked.
     fn source_settings(&mut self, ui: &mut Ui) {
@@ -773,11 +773,10 @@ impl OndApp {
                     picked = Some((entry.id, event));
                 }
             }
+            if ui.add_enabled(!self.prefs.managed("sources"), egui::Button::new("Add source…")).clicked() {
+                self.actions.push(Action::Onboarding(kit::OnboardingEvent::AddAnother));
+            }
         });
-        if configured.len() > 1 {
-            note(ui, "Ond plays from one source at a time. The others keep their library on this computer until you use them again.");
-            ui.add_space(20.0);
-        }
         self.actions.extend(picked.map(|(id, event)| match event {
             kit::SourceRowEvent::Rename(name) => PrefsAction::SourceName(id, name).into(),
             kit::SourceRowEvent::Color(color) => PrefsAction::SourceColor(id, color).into(),
