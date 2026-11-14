@@ -47,7 +47,7 @@
 //!   sources; [`source_dot_lead`] in front of a line of text,
 //!   [`source_dot_after`] and [`text_then_dots`] after one,
 //!   [`source_label`], a dot and a name as one item, and [`source_cell`],
-//!   one in a table's Source column), and the sidebar's
+//!   one in a table's Source column, or [`sources_cell`], several), and the sidebar's
 //!   foot, [`source_switcher`]: what's in scope
 //!   ([`SourceSwitcher`], drawn in the app's [`SwitcherLook`] at its
 //!   [`SwitcherPlace`]) and a menu to change it, which says what was picked

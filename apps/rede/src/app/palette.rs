@@ -186,17 +186,17 @@ impl kit::PaletteRows for Rows<'_> {
                     Some(progress) => format!("{author} · {progress}"),
                     None => author.to_owned(),
                 };
-                PaletteRow { title: book.title.clone(), detail, keys: BOOK_KEYS, dot: None }
+                PaletteRow { title: book.title.clone(), detail, keys: BOOK_KEYS, dots: Vec::new() }
             }
             Some(Hit::Name(kind, i)) => {
                 let series = kind == super::search::Kind::Series;
                 kit::palette_icon_tile(ui, tile, if series { Icon::List } else { Icon::Person });
                 let keys = if series { SERIES_KEYS } else { NAME_KEYS };
-                let Some(name) = self.index.name(kind, i) else { return PaletteRow { title: String::new(), detail: String::new(), keys, dot: None } };
+                let Some(name) = self.index.name(kind, i) else { return PaletteRow { title: String::new(), detail: String::new(), keys, dots: Vec::new() } };
                 let books = if name.books == 1 { "1 book".to_owned() } else { format!("{} books", name.books) };
-                PaletteRow { title: name.name.clone(), detail: format!("{} · {books}", kind.label()), keys, dot: None }
+                PaletteRow { title: name.name.clone(), detail: format!("{} · {books}", kind.label()), keys, dots: Vec::new() }
             }
-            None => PaletteRow { title: String::new(), detail: String::new(), keys: BOOK_KEYS, dot: None },
+            None => PaletteRow { title: String::new(), detail: String::new(), keys: BOOK_KEYS, dots: Vec::new() },
         }
     }
 }

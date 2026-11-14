@@ -185,8 +185,10 @@ struct Hits<'h> {
 }
 
 impl Hits<'_> {
-    fn dot(&self, id: &str) -> Option<accounts::SourceColor> {
-        self.dots.as_ref()?.get(crate::source::identity::account(id)?).map(|m| m.color)
+    /// A dot for each source holding a copy of what `copies` lists.
+    fn dots(&self, copies: Vec<accounts::ItemKey>) -> Vec<accounts::SourceColor> {
+        let Some(marks) = self.dots.as_ref() else { return Vec::new() };
+        copies.iter().filter_map(|k| marks.get(k.account)).map(|m| m.color).collect()
     }
 }
 
@@ -205,12 +207,12 @@ impl kit::PaletteRows for Hits<'_> {
     fn row(&mut self, ui: &mut egui::Ui, tile: Rect, n: usize) -> PaletteRow {
         let keys = "⏎ open    ⌘⏎ play";
         let (index, data) = (&*self.index, self.data);
-        let Some(hit) = self.results.hit(n) else { return PaletteRow { title: String::new(), detail: String::new(), keys, dot: None } };
-        let (title, detail, dot) = match hit {
+        let Some(hit) = self.results.hit(n) else { return PaletteRow { title: String::new(), detail: String::new(), keys, dots: Vec::new() } };
+        let (title, detail, dots) = match hit {
             Hit::Artist(i) => {
                 let a = &index.artists[i];
                 super::artists::avatar(self.art, ui, tile, a.cover.as_deref().as_slice(), &a.name, &a.album_covers);
-                (a.name.clone(), format!("Artist · {}", crate::fmt::plural(a.albums, "album")), None)
+                (a.name.clone(), format!("Artist · {}", crate::fmt::plural(a.albums, "album")), Vec::new())
             }
             Hit::Album(i) => {
                 let a = &index.albums[i];
@@ -222,7 +224,7 @@ impl kit::PaletteRows for Hits<'_> {
                     Some(y) => format!("{} · {y}", a.artist),
                     None => a.artist.clone(),
                 };
-                (a.title.clone(), sub, self.dot(&a.id))
+                (a.title.clone(), sub, self.dots(data.copies_of_album(&a.id)))
             }
             Hit::Track(i) => {
                 let tr = &index.tracks[i];
@@ -230,10 +232,10 @@ impl kit::PaletteRows for Hits<'_> {
                     Some(al) => self.art.paint_as(ui, tile, al.cover_art.as_deref(), 4.0, &crate::art::album_cover(al)),
                     None => self.art.paint(ui, tile, None, 4.0),
                 }
-                (tr.title.clone(), format!("Song · {} · {}", tr.artist, tr.album), self.dot(&tr.id))
+                (tr.title.clone(), format!("Song · {} · {}", tr.artist, tr.album), self.dots(data.copies_of_track(&tr.id)))
             }
         };
-        PaletteRow { title, detail, keys, dot }
+        PaletteRow { title, detail, keys, dots }
     }
 }
 

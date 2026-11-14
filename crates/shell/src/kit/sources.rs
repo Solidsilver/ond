@@ -224,6 +224,26 @@ pub fn source_cell(ui: &Ui, x: f32, cy: f32, width: f32, color: SourceColor, (na
     ui.painter().galley(pos2(text_x, cy - g.size().y / 2.0), g, ink);
 }
 
+/// [`source_cell`] for something more than one source holds (the same
+/// album on two servers): their dots (`colors`) stacked on `ground` from
+/// `x`, then their `names`, or how many there are ("2 sources") where the
+/// names don't fit what's left of `width`, as the switcher does. One
+/// source draws exactly as [`source_cell`] does; none draws nothing.
+pub fn sources_cell(ui: &Ui, x: f32, cy: f32, width: f32, colors: &[SourceColor], ground: Color32, (names, font, ink): (&[&str], FontId, Color32)) {
+    let lead = match (colors, names) {
+        ([], _) => return,
+        ([one], [name, ..]) => return source_cell(ui, x, cy, width, *one, (name, font, ink)),
+        (many, _) => dots_width(many.len()) + DOT_LEAD - 2.0 * DOT_R,
+    };
+    if width < lead {
+        return;
+    }
+    source_dots(ui, pos2(x + dots_width(colors.len()) / 2.0, cy), colors, ground);
+    let all = ui.painter().layout_no_wrap(names.join(", "), font.clone(), ink);
+    let g = if all.size().x <= width - lead { all } else { elide(ui, &format!("{} sources", colors.len()), font, ink, width - lead) };
+    ui.painter().galley(pos2(x + lead, cy - g.size().y / 2.0), g, ink);
+}
+
 /// Several sources' dots overlapping in a row centred on `center`, the
 /// first on top, each cut out of the one under it by a ring of `ground`
 /// (what they're drawn on). All sources' mark.
@@ -1049,6 +1069,36 @@ mod tests {
         });
         let (x, w) = text.expect("the name");
         assert!((x - (20.0 + DOT_LEAD)).abs() < 0.5 && x + w <= 80.0 + 0.5, "the name follows, cut to the cell: {x} {w}");
+    }
+
+    #[test]
+    fn a_cell_for_several_sources_stacks_their_dots_before_the_names() {
+        let (one, two) = (SourceColor::new(1), SourceColor::new(6));
+        let mut h = themed((), move |ui, _| {
+            let t = Tokens::of(ui);
+            sources_cell(ui, 20.0, 30.0, 100.0, &[one, two], t.bg, (&["Home server", "Music folder"], FontId::proportional(13.0), t.muted));
+            sources_cell(ui, 20.0, 60.0, 300.0, &[one, two], t.bg, (&["Home server", "Music folder"], FontId::proportional(13.0), t.muted));
+        });
+        h.run();
+        let shapes = shapes_of(&h.output().shapes);
+        let dot_x = |color: SourceColor| {
+            shapes.iter().find_map(|s| match s {
+                egui::Shape::Circle(c) if c.fill == theme::source_color(color, false) => Some(c.center.x),
+                _ => None,
+            })
+        };
+        let (first, second) = (dot_x(one).expect("the first dot"), dot_x(two).expect("the second dot"));
+        assert!((first - (20.0 + DOT_R)).abs() < 0.5 && second > first, "the dots lead, in order: {first} {second}");
+        let text = |y: f32| {
+            shapes.iter().find_map(|s| match s {
+                egui::Shape::Text(t) if (t.pos.y + t.galley.size().y / 2.0 - y).abs() < 1.0 => Some((t.pos.x, t.galley.size().x, t.galley.text().to_owned())),
+                _ => None,
+            })
+        };
+        let (x, w, narrow) = text(30.0).expect("the narrow cell's words");
+        assert!(x > second + DOT_R && x + w <= 120.0 + 0.5, "the words follow the dots, inside the cell: {x} {w}");
+        assert_eq!(narrow, "2 sources", "names that don't fit give way to the count");
+        assert_eq!(text(60.0).expect("the wide cell's words").2, "Home server, Music folder");
     }
 
     #[test]
