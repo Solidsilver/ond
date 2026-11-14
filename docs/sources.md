@@ -1,6 +1,6 @@
 # Sources: several libraries in one player
 
-Status: milestones 1–4 are built, UI included. Milestone 4 brings concurrent sources with independent sessions and watchers, account-qualified in-memory identity, persisted scope and chips, merged libraries and artists, scope-aware search and navigation, and mixed Ond playlists; in Ond's UI, the switcher with each source's own state (an unreachable server flagged, a narrowed scope named, boxes to toggle sources), source dots on covers, the queue, playlists, the album page, search and what's playing, a Source column in lists that mix sources, filter chips under the library pages, a merged artist's albums grouped by source, the Make Ond playlist offer, and each source's live state in Settings › Sources. Milestone 5 remains design. Updated 13 November 2026. Covers Ond, and the parts Rede shares with it. Rede's own plan for sources is in [its design](rede/design.md#sources-and-accounts); this document follows it and says where the two apps meet.
+Status: milestones 1–4 are built, UI included. Milestone 4 brings concurrent sources with independent sessions and watchers, account-qualified in-memory identity, persisted scope and chips, merged libraries and artists, scope-aware search and navigation, and mixed Ond playlists; in Ond's UI, the switcher with each source's own state (an unreachable server flagged, a narrowed scope named, boxes to toggle sources), source dots on covers, the queue, playlists, the album page, search and what's playing, a Source column in lists that mix sources, filter chips under the library pages, a merged artist's albums grouped by source, the Make Ond playlist offer, and each source's live state in Settings › Sources. Milestone 5 stage 1 has its backend; its UI and stages 2–3 remain planned. Updated 14 November 2026. Covers Ond, and the parts Rede shares with it. Rede's own plan for sources is in [its design](rede/design.md#sources-and-accounts); this document follows it and says where the two apps meet.
 
 Ond plays from one Navidrome server. This design makes the server one **source** among several: a Navidrome (or other OpenSubsonic) server, a local folder of music, and later Jellyfin and Plex. Setup starts with one or more of them, and the library shows one source at a time or all of them together.
 
@@ -304,3 +304,60 @@ source/session implementation is unchanged.
 - **Settled:** Work Offline is one persisted switch for every networked source. It cancels their sessions and reconnect attempts together; local folders stay open and their watchers keep running. An unreachable server otherwise changes only its own state.
 - When a track is starred in All sources and its source can't hold stars, Ond keeps the star. If that source later gains the capability (a server upgrade), are Ond's stars sent to it?
 - **Settled:** Mini and the Player show the playing song's source dot, and nothing else of the merged view.
+
+## Ond backend handoff (milestone 5, stage 1)
+
+- `Settings.combine_copies` and `PrefsView.combine_copies` are off by
+  default. Dispatch `Action::Prefs(PrefsAction::CombineCopies(on))` from
+  Settings › Sources' **Combine matching albums** row. Home Manager may
+  manage `combine_copies`; use the usual managed lock on that row. The
+  action rebuilds the projection and invalidates search immediately.
+- Per-source mirrors keep their original albums and tracks. Release ids
+  live in `album_mbids_v1`, recording ids in `recording_mbids_v1`, both
+  versioned saved `BTreeMap<String, String>` blobs with bare source ids.
+  OpenSubsonic album lists, album fetches and bulk song syncs collect them;
+  local scans use `mb_album_id` and `mb_recording_id`, never release-group
+  or release-track ids. Loading, saving and messages discard blank ids
+  through `clean_mbid`; a cleared server tag removes a previously saved id.
+  `Data.album_mbids` and `Data.recording_mbids` have qualified in-memory keys.
+  Frozen postcard rows and their schema versions are unchanged.
+- `source::copies::{albums, songs}` is the pure matcher. Album name
+  fallback uses the merged artist groups and `normalize_name` on the whole
+  title. Known releases are grouped before untagged copies, so an untagged
+  copy cannot bridge conflicting release ids. A group never has two members
+  of one source. Songs try recording identity first, then position and title;
+  an unnumbered song needs a unique title in each participating album copy.
+  Missing or zero disc numbers mean disc 1; zero track numbers are unnumbered.
+- The projection filters scope first and combines only with the setting on
+  and at least two source snapshots in scope. `Data.albums`, `tracks.all`,
+  `tracks.album(lead)` and search contain the union once. Songs unique to a
+  later source retain their real song key, with their visible `album_id`
+  pointing to the album lead. Album counts and duration describe that union;
+  artists count and list it once. One-source chips and scopes expose plain
+  source rows. Switching off restores the milestone 4 projection.
+- `Data.album_copies` and `Data.track_copies` contain combined groups only,
+  from the lead's canonical ItemKey spelling to `Vec<ItemKey>` (lead first,
+  settings source order). `copies_of_album(id)` and `copies_of_track(id)`
+  also handle singletons and non-lead members. Every ItemKey carries its
+  account for dot colours/names. `album_lead(id)` and `track_lead(id)` resolve
+  members to their current lead without inventing identities. Album routes
+  follow an available member when combination, source order or chips change.
+- `album_copy(id)` and `track_copy(id)` expose the source's original row.
+  `copy_format(track_id)` exposes `suffix`, `bitrate_kbps` and `lossless`;
+  `album_copy_formats(album_id)` returns those formats grouped by account,
+  in source order, including formats of songs absent on the lead source.
+  The UI pass should draw one dot per copy on combined covers and song rows,
+  list every copy in the Source column, and show distinct album suffixes as
+  **FLAC · MP3**. It should avoid source headings that repeat a combined album
+  and use the union counts. The accessors and preference action awaiting
+  that pass have narrow dead-code allowances, removable once the UI uses them.
+- Projection memos include source order, scope, the combine switch and each
+  source's album, track, artist, identity and list versions. Copy metadata
+  changes rebuild the union and advance the search generation, even when
+  the frozen rows did not change.
+
+This stage adds no visual controls or marks. The existing scenes retain their
+milestone 4 drawing. Preferred-copy choice and playback fallback (stage 2),
+and shared stars, ratings, play counts, downloads and Keep apart (stage 3)
+remain for their own passes. Copies stay in source order for those stages;
+queue, playlist and pin identities remain ordinary member keys.

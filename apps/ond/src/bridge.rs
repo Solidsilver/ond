@@ -165,6 +165,8 @@ pub enum LibraryMsg {
         parts: Vec<(accounts::AccountId, u64, Vec<Track>)>,
     },
     ArtistMbids(Vec<(String, String)>),
+    AlbumMbids(Vec<(String, String)>),
+    RecordingMbids(Vec<(String, String)>),
     /// A search index built off the UI thread, for the request numbered `generation`.
     SearchIndex {
         generation: u64,
@@ -736,6 +738,28 @@ impl Bridge {
         (self.notify)();
     }
 
+    fn load_copy_mbids(&self, library: &Library) {
+        use crate::source::mbids::{ALBUMS, RECORDINGS};
+        for (name, message) in [(ALBUMS, LibraryMsg::AlbumMbids as fn(_) -> _), (RECORDINGS, LibraryMsg::RecordingMbids)] {
+            if let Ok(Some(rows)) = library.saved::<std::collections::BTreeMap<String, String>>(name) {
+                self.send(message(crate::source::artists::clean_mbids(rows)));
+            }
+        }
+    }
+
+    async fn keep_copy_mbids(&self, ids: crate::source::mbids::CopyMbids) {
+        if ids.albums.is_empty() && ids.recordings.is_empty() {
+            return;
+        }
+        match self.db(move |library| ids.save(library)).await {
+            Ok((albums, recordings)) => {
+                self.send(LibraryMsg::AlbumMbids(albums));
+                self.send(LibraryMsg::RecordingMbids(recordings));
+            }
+            Err(e) => self.send(Msg::Error(Failure::Local(format!("Couldn't save MusicBrainz ids: {e}")))),
+        }
+    }
+
     /// Runs `f` on the library off the async workers (redb blocks).
     async fn db<T: Send + 'static>(&self, f: impl FnOnce(&Library) -> library::Result<T> + Send + 'static) -> Result<T, String> {
         if !self.current() {
@@ -789,6 +813,7 @@ impl Bridge {
             if let Ok(Some(mbids)) = l.saved::<std::collections::BTreeMap<String, String>>("artist_mbids_v1") {
                 this.send(LibraryMsg::ArtistMbids(crate::source::artists::clean_mbids(mbids)));
             }
+            this.load_copy_mbids(&l);
             let mut saved = Saved {
                 newest: l.saved(SAVED_NEWEST).ok().flatten(),
                 playlists: l.saved::<Vec<SavedPlaylist>>(SAVED_PLAYLISTS).ok().flatten().map(|p| p.into_iter().map(Into::into).collect()),
@@ -1165,6 +1190,7 @@ impl Bridge {
                     if let Ok(Some(mbids)) = this.library().saved::<std::collections::BTreeMap<String, String>>("artist_mbids_v1") {
                         this.send(LibraryMsg::ArtistMbids(crate::source::artists::clean_mbids(mbids)));
                     }
+                    this.load_copy_mbids(&this.library());
                     this.send(LibraryMsg::Artists(synced.artists));
                     this.send(LibraryMsg::Newest(synced.newest_ids));
                     this.send(LibraryMsg::AlbumSyncDone(Ok(synced.album_count)));
@@ -1212,6 +1238,7 @@ impl Bridge {
             match listed {
                 Ok(albums) => {
                     let n = albums.len();
+                    this.keep_copy_mbids(source.copy_mbids()).await;
                     this.send(LibraryMsg::Albums(albums));
                     this.send(LibraryMsg::AlbumSyncDone(Ok(n)));
                 }
@@ -1260,7 +1287,7 @@ impl Bridge {
             let progressed = AtomicBool::new(false);
             let outcome = sync::run(
                 this.library(),
-                source,
+                source.clone(),
                 cancel.clone(),
                 || this.current(),
                 |p| {
@@ -1288,6 +1315,7 @@ impl Bridge {
                 }
                 return;
             }
+            this.keep_copy_mbids(source.copy_mbids()).await;
             // Show what was stored, unless nothing changed.
             if this.reload_owed.swap(false, Ordering::AcqRel) || stored {
                 let me = this.clone();
@@ -1343,6 +1371,9 @@ impl Bridge {
                 Ok(a) => a,
                 Err(e) => return this.send(LibraryMsg::LoadFailed { key, error: Some(e.context("Couldn't load the album")) }),
             };
+            if let Some(paged) = source.paged() {
+                this.keep_copy_mbids(paged.copy_mbids()).await;
+            }
             let id = album_id.clone();
             let stored = this
                 .db(move |l| {
@@ -1737,6 +1768,9 @@ impl Bridge {
         {
             match source.album(&raw).await {
                 Ok((album, meta)) if this.current() => {
+                    if let Some(paged) = source.paged() {
+                        this.keep_copy_mbids(paged.copy_mbids()).await;
+                    }
                     tracks = album.tracks.clone();
                     if this.db(move |l| l.upsert_album_tracks(album)).await.is_ok() {
                         this.send(Msg::UserMeta { meta, tracks: tracks.clone() });
@@ -1807,6 +1841,7 @@ impl Bridge {
     /// One album's tracks from the server, stored, as the library has them.
     async fn fetch_album<F: sync::Fetch>(&self, source: &F, id: String) -> Result<Vec<Track>, Failure> {
         let album = source.album(id.clone()).await?;
+        self.keep_copy_mbids(source.copy_mbids()).await;
         self.db(move |l| l.upsert_album_tracks(album).and_then(|_| l.album_tracks(&id))).await.map_err(Failure::Local)
     }
 }

@@ -67,6 +67,9 @@ pub trait Fetch: Send + Sync + 'static {
     fn artist_mbids(&self) -> Vec<(String, String)> {
         Vec::new()
     }
+    fn copy_mbids(&self) -> crate::source::mbids::CopyMbids {
+        Default::default()
+    }
     /// One page of the album list, alphabetical by artist.
     async fn album_page(&self, size: u32, offset: u32) -> Result<Vec<Album>, Failure>;
     async fn artists(&self) -> Result<Vec<Artist>, Failure>;
@@ -79,6 +82,9 @@ pub trait Fetch: Send + Sync + 'static {
 impl<T: Fetch + ?Sized> Fetch for Arc<T> {
     fn artist_mbids(&self) -> Vec<(String, String)> {
         (**self).artist_mbids()
+    }
+    fn copy_mbids(&self) -> crate::source::mbids::CopyMbids {
+        (**self).copy_mbids()
     }
     async fn album_page(&self, size: u32, offset: u32) -> Result<Vec<Album>, Failure> {
         (**self).album_page(size, offset).await

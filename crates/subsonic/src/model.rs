@@ -75,6 +75,8 @@ impl AlbumListType {
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Album {
+    /// MusicBrainz release identity (not the release group).
+    pub music_brainz_id: Option<String>,
     pub id: String,
     pub name: String,
     pub artist: Option<String>,
@@ -131,6 +133,8 @@ pub struct ReplayGain {
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Song {
+    /// MusicBrainz recording identity.
+    pub music_brainz_id: Option<String>,
     pub id: String,
     pub title: String,
     pub album: Option<String>,

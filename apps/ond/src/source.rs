@@ -5,8 +5,10 @@
 //! named and what it can do before its source is connected.
 
 pub mod artists;
+pub mod copies;
 pub mod identity;
 pub mod local;
+pub mod mbids;
 pub mod subsonic;
 
 use crate::bridge::PlaylistEdit;

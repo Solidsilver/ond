@@ -19,11 +19,33 @@ pub struct SubsonicSource {
     account: accounts::AccountId,
     client: Client,
     artist_mbids: Arc<std::sync::Mutex<Vec<(String, String)>>>,
+    copy_mbids: Arc<std::sync::Mutex<super::mbids::CopyMbids>>,
 }
 
 impl SubsonicSource {
     pub fn new(account: accounts::AccountId, client: Client) -> Self {
-        Self { account, client, artist_mbids: Arc::default() }
+        Self { account, client, artist_mbids: Arc::default(), copy_mbids: Arc::default() }
+    }
+
+    fn remember_albums(&self, albums: &[::subsonic::Album]) {
+        let mut ids = self.copy_mbids.lock().unwrap_or_else(|e| e.into_inner());
+        for album in albums {
+            ids.albums.insert(album.id.clone(), super::artists::clean_mbid(album.music_brainz_id.as_deref()));
+        }
+    }
+
+    fn remember_songs(&self, songs: &[::subsonic::Song]) {
+        let mut ids = self.copy_mbids.lock().unwrap_or_else(|e| e.into_inner());
+        for song in songs {
+            ids.recordings.insert(song.id.clone(), super::artists::clean_mbid(song.music_brainz_id.as_deref()));
+        }
+    }
+
+    async fn read_album(&self, id: &str) -> Result<::subsonic::AlbumWithSongs, Failure> {
+        let album = self.client.album(id).await?;
+        self.remember_albums(std::slice::from_ref(&album.album));
+        self.remember_songs(&album.song);
+        Ok(album)
     }
 }
 
@@ -68,14 +90,16 @@ impl MusicSource for SubsonicSource {
     }
 
     async fn album(&self, id: &str) -> Result<(AlbumTracks, UserMeta), Failure> {
-        let album = self.client.album(id).await?;
+        let album = self.read_album(id).await?;
         let mut meta = song_meta(&album.song);
         meta.starred.push((StarKind::Album, id.to_owned(), album.album.starred.is_some()));
         Ok((convert::album_tracks(album), meta))
     }
 
     async fn newest(&self, count: u32) -> Result<Vec<Album>, Failure> {
-        Ok(self.client.album_list(AlbumListType::Newest, count, 0).await?.into_iter().map(convert::album).collect())
+        let albums = self.client.album_list(AlbumListType::Newest, count, 0).await?;
+        self.remember_albums(&albums);
+        Ok(albums.into_iter().map(convert::album).collect())
     }
 
     async fn playlists(&self) -> Result<Vec<Playlist>, Failure> {
@@ -178,8 +202,13 @@ impl Fetch for SubsonicSource {
     fn artist_mbids(&self) -> Vec<(String, String)> {
         self.artist_mbids.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
+    fn copy_mbids(&self) -> super::mbids::CopyMbids {
+        self.copy_mbids.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
     async fn album_page(&self, size: u32, offset: u32) -> Result<Vec<Album>, Failure> {
-        Ok(self.client.album_list(AlbumListType::AlphabeticalByArtist, size, offset).await?.into_iter().map(convert::album).collect())
+        let albums = self.client.album_list(AlbumListType::AlphabeticalByArtist, size, offset).await?;
+        self.remember_albums(&albums);
+        Ok(albums.into_iter().map(convert::album).collect())
     }
 
     async fn artists(&self) -> Result<Vec<Artist>, Failure> {
@@ -190,11 +219,12 @@ impl Fetch for SubsonicSource {
     }
 
     async fn album(&self, id: String) -> Result<AlbumTracks, Failure> {
-        Ok(convert::album_tracks(self.client.album(&id).await?))
+        Ok(convert::album_tracks(self.read_album(&id).await?))
     }
 
     async fn all_songs(&self, query: &'static str, count: u32, offset: u32) -> Result<SongPage, Failure> {
         let songs = self.client.search_songs(query, count, offset).await?;
+        self.remember_songs(&songs);
         Ok(SongPage { scanned: songs.len() as u32, tracks: convert::bulk_tracks(songs) })
     }
 }
@@ -323,5 +353,32 @@ mod tests {
         assert_eq!(fake.seen().len(), 2);
         assert_eq!(lib.album_tracks("album").unwrap().len(), 500);
         assert!(lib.album_tracks("album").unwrap().iter().any(|t| t.id == "last"));
+    }
+    #[tokio::test]
+    async fn album_fetches_and_bulk_songs_collect_clean_copy_ids_separately_from_rows() {
+        let fake = JsonFake::start(|r| match r.path() {
+            "/rest/getAlbumList2" => ok(json!({"albumList2":{"album":[{"id":"a", "name":"Record", "musicBrainzId":" release "}]}})),
+            "/rest/getAlbum" => {
+                ok(json!({"album":{"id":"a", "name":"Record", "musicBrainzId":"release", "song":[{"id":"s", "title":"Song", "musicBrainzId":" recording "}]}}))
+            }
+            "/rest/search3" => ok(
+                json!({"searchResult3":{"song":[{"id":"bulk", "albumId":"a", "title":"Bulk song", "musicBrainzId":" bulk-recording "}, {"id":"blank", "albumId":"a", "title":"Blank", "musicBrainzId":"  "}]}}),
+            ),
+            _ => panic!("unexpected request"),
+        });
+        let source = source(&fake);
+        assert_eq!(source.album_page(500, 0).await.unwrap().len(), 1);
+        assert_eq!(Fetch::album(&source, "a".into()).await.unwrap().tracks.len(), 1);
+        assert_eq!(source.all_songs("", 500, 0).await.unwrap().tracks.len(), 2);
+        let library = library::Library::in_memory().unwrap();
+        source.copy_mbids().save(&library).unwrap();
+        let albums = library.saved::<std::collections::BTreeMap<String, String>>(super::super::mbids::ALBUMS).unwrap().unwrap();
+        let songs = library.saved::<std::collections::BTreeMap<String, String>>(super::super::mbids::RECORDINGS).unwrap().unwrap();
+        assert_eq!(albums["a"], "release");
+        assert_eq!(songs["s"], "recording");
+        assert_eq!(songs["bulk"], "bulk-recording");
+        assert!(!songs.contains_key("blank"));
+        assert!(library.albums().unwrap().is_empty());
+        assert!(library.all_tracks().unwrap().is_empty());
     }
 }

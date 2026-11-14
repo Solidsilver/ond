@@ -17,6 +17,7 @@ use std::path::{Path, PathBuf};
 /// app's own state (where windows were, the volume, column widths).
 const ALLOWED: &[&str] = &[
     "sources",
+    "combine_copies",
     "server",
     "username",
     "scrobble",

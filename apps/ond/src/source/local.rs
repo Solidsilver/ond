@@ -158,6 +158,12 @@ impl LocalSource {
             }
         }
         library.save("artist_mbids_v1", &mbids).map_err(|e| LocalSyncError::Storage(e.to_string()))?;
+        let album_mbids: BTreeMap<_, _> =
+            result.albums.iter().filter_map(|a| Some((a.id.clone(), crate::source::artists::clean_mbid(a.mb_album_id.as_deref())?))).collect();
+        let recording_mbids: BTreeMap<_, _> =
+            result.tracks.iter().filter_map(|t| Some((t.id.clone(), crate::source::artists::clean_mbid(t.mb_recording_id.as_deref())?))).collect();
+        library.save(crate::source::mbids::ALBUMS, &album_mbids).map_err(|e| LocalSyncError::Storage(e.to_string()))?;
+        library.save(crate::source::mbids::RECORDINGS, &recording_mbids).map_err(|e| LocalSyncError::Storage(e.to_string()))?;
         let artists: Vec<Artist> = result.artists.into_iter().map(convert_artist).collect();
         let albums: Vec<Album> = result.albums.into_iter().map(convert_album).collect();
         let tracks: Vec<Track> = result.tracks.into_iter().map(convert_track).collect();
@@ -488,6 +494,7 @@ mod tests {
                     ("ALBUMARTIST", "Artist A"),
                     ("TRACKNUMBER", "1"),
                     ("MUSICBRAINZ_TRACKID", "mb-rec-1"),
+                    ("MUSICBRAINZ_ALBUMID", "mb-release-1"),
                 ],
                 Some(b"embedded-png"),
             ),
@@ -538,6 +545,14 @@ mod tests {
         let tracks = lib.all_tracks().unwrap();
         let t1 = tracks.iter().find(|t| t.title == "Track One").unwrap();
         let t2 = tracks.iter().find(|t| t.title == "Track Two").unwrap();
+        assert_eq!(
+            lib.saved::<BTreeMap<String, String>>(crate::source::mbids::ALBUMS).unwrap().unwrap(),
+            BTreeMap::from([(t1.album_id.clone(), "mb-release-1".into())])
+        );
+        assert_eq!(
+            lib.saved::<BTreeMap<String, String>>(crate::source::mbids::RECORDINGS).unwrap().unwrap(),
+            BTreeMap::from([(t1.id.clone(), "mb-rec-1".into())])
+        );
 
         let (url, suffix) = source.stream(t1, None);
         assert_eq!(url, format!("file://{}", track1_path.display()));

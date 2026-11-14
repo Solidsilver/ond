@@ -72,6 +72,14 @@ impl TrackSet {
         Self { all, by_album, sources, ..Default::default() }
     }
 
+    /// Combined rows keep original members resolvable for queues and copy
+    /// metadata, while search and album lists walk only their leads.
+    pub fn combined(tracks: Vec<Track>, originals: Arc<TrackSet>) -> Self {
+        let mut set = Self::new(tracks);
+        set.sources.push(originals);
+        set
+    }
+
     /// Groups `tracks`, which the library returns album by album. An album
     /// split across runs still works: its runs are joined into one list.
     pub fn new(tracks: Vec<Track>) -> Self {

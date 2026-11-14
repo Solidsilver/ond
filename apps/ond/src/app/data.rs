@@ -21,6 +21,19 @@ use offline::Pin;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+mod copies;
+
+type CopyVersions = Vec<(Option<accounts::AccountId>, u64, u64, u64, u64, u64)>;
+
+/// The original format of one copy, before any playback transcoding.
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CopyFormat<'a> {
+    pub suffix: Option<&'a str>,
+    pub bitrate_kbps: Option<u32>,
+    pub lossless: bool,
+}
+
 /// Everything known about the library, as last loaded.
 #[derive(Default)]
 pub struct Data {
@@ -31,8 +44,20 @@ pub struct Data {
     merged_track_versions: Vec<(Option<accounts::AccountId>, u64)>,
     merged_artist_versions: Vec<(Option<accounts::AccountId>, u64)>,
     merged_list_versions: Vec<(Option<accounts::AccountId>, u64)>,
+    merged_mbid_versions: Vec<(Option<accounts::AccountId>, u64)>,
     pub merged_artists: Vec<crate::source::artists::MergedArtist>,
     pub artist_mbids: HashMap<String, String>,
+    pub album_mbids: HashMap<String, String>,
+    pub recording_mbids: HashMap<String, String>,
+    pub mbids_version: u64,
+    combined_versions: Option<CopyVersions>,
+    /// Only combined groups; singleton accessors return the item itself.
+    pub album_copies: HashMap<String, Vec<accounts::ItemKey>>,
+    pub track_copies: HashMap<String, Vec<accounts::ItemKey>>,
+    album_leads: HashMap<String, String>,
+    track_leads: HashMap<String, String>,
+    copy_albums: HashMap<String, Album>,
+    copy_tracks: Option<Arc<TrackSet>>,
     /// Shared with a search index being built from it, so handing it over
     /// copies nothing.
     pub albums: Arc<Vec<Album>>,
@@ -70,12 +95,32 @@ impl Data {
     /// Materializes the scope from independently versioned source snapshots.
     /// Source snapshots keep their shared albums and track slices between
     /// batches, so receiving one source never rebuilds another's indexes.
-    pub(super) fn merge_sources(&mut self, sources: &[&Data]) {
+    pub(super) fn merge_sources(&mut self, sources: &[&Data], combine: bool) {
+        let combine = combine && sources.len() > 1;
+        let copy_versions: CopyVersions =
+            sources.iter().map(|d| (d.account, d.version, d.tracks_version, d.artists_version, d.mbids_version, d.lists_version)).collect();
+        let copies_changed = self.combined_versions.as_ref().is_none_or(|v| v != &copy_versions);
+        let reset = self.combined_versions.is_some() && (!combine || copies_changed) || combine && copies_changed;
+        if reset {
+            self.album_copies.clear();
+            self.track_copies.clear();
+            self.album_leads.clear();
+            self.track_leads.clear();
+            self.copy_albums.clear();
+            self.copy_tracks = None;
+        }
+        let rebuild_copies = combine && copies_changed;
+        let mbids: Vec<_> = sources.iter().map(|d| (d.account, d.mbids_version)).collect();
+        if self.merged_mbid_versions != mbids {
+            self.album_mbids = sources.iter().flat_map(|d| d.album_mbids.iter().map(|(k, v)| (k.clone(), v.clone()))).collect();
+            self.recording_mbids = sources.iter().flat_map(|d| d.recording_mbids.iter().map(|(k, v)| (k.clone(), v.clone()))).collect();
+            self.merged_mbid_versions = mbids;
+        }
         let albums: Vec<_> = sources.iter().map(|d| (d.account, d.version)).collect();
         let tracks: Vec<_> = sources.iter().map(|d| (d.account, d.tracks_version)).collect();
         let artists: Vec<_> = sources.iter().map(|d| (d.account, d.artists_version)).collect();
         let lists: Vec<_> = sources.iter().map(|d| (d.account, d.lists_version)).collect();
-        if self.merged_album_versions != albums {
+        if reset || self.merged_album_versions != albums {
             let mut merged: Vec<_> = sources.iter().flat_map(|d| d.albums.iter().cloned()).collect();
             // Each source's albums come in its database's order (artist,
             // year, title); merged, they're put back in that order together.
@@ -85,7 +130,7 @@ impl Data {
             self.set_albums(merged);
             self.newest = sources.iter().flat_map(|d| d.newest.iter().cloned()).collect();
         }
-        if self.merged_track_versions != tracks || (sources.len() > 1 && self.merged_album_versions != albums) {
+        if reset || self.merged_track_versions != tracks || (sources.len() > 1 && self.merged_album_versions != albums) {
             let mut set = TrackSet::merge(sources.iter().map(|d| d.tracks.clone()));
             // Single-source tracks keep their source's order; merged across
             // sources, interleave them in the Songs list order (Artist
@@ -97,7 +142,7 @@ impl Data {
             }
             self.set_tracks(set);
         }
-        if self.merged_list_versions != lists {
+        if reset || self.merged_list_versions != lists {
             self.playlists = sources.iter().flat_map(|d| d.playlists.iter().cloned()).collect();
             self.playlist_tracks = sources.iter().flat_map(|d| d.playlist_tracks.iter().map(|(id, ts)| (id.clone(), ts.clone()))).collect();
             self.credited.clear();
@@ -107,7 +152,7 @@ impl Data {
                 }
             }
         }
-        if self.merged_artist_versions != artists || self.merged_album_versions != albums {
+        if reset || self.merged_artist_versions != artists || self.merged_album_versions != albums {
             self.artist_mbids = sources.iter().flat_map(|d| d.artist_mbids.iter().map(|(k, v)| (k.clone(), v.clone()))).collect();
             self.artists = Arc::new(sources.iter().flat_map(|d| d.artists.iter().cloned()).collect());
             self.rebuild_merged_artists();
@@ -117,6 +162,10 @@ impl Data {
         self.merged_track_versions = tracks;
         self.merged_artist_versions = artists;
         self.merged_list_versions = lists;
+        if rebuild_copies {
+            self.combine_copies(sources);
+        }
+        self.combined_versions = combine.then_some(copy_versions);
     }
 
     pub(super) fn artist_catalog(sources: &[&Data]) -> Vec<crate::source::artists::MergedArtist> {
@@ -133,6 +182,10 @@ impl Data {
 
     pub(super) fn remember_artist_members(&mut self, catalog: &[crate::source::artists::MergedArtist]) {
         self.merged_artists = catalog.to_vec();
+        if !self.album_copies.is_empty() {
+            self.remap_artist_albums();
+            return;
+        }
         for group in &mut self.merged_artists {
             for albums in group.albums.values_mut() {
                 albums.retain(|id| self.by_id.contains_key(id));
@@ -399,6 +452,22 @@ impl OndApp {
                     .flat_map(|(_, _, tracks)| tracks)
                     .collect();
                 self.library_msg(LibraryMsg::TrackBatch { key, tracks });
+            }
+            LibraryMsg::AlbumMbids(rows) => {
+                let ids = crate::source::artists::clean_mbids(rows).into_iter().collect();
+                if self.data.album_mbids != ids {
+                    self.data.album_mbids = ids;
+                    self.data.mbids_version += 1;
+                    self.search.stale = true;
+                }
+            }
+            LibraryMsg::RecordingMbids(rows) => {
+                let ids = crate::source::artists::clean_mbids(rows).into_iter().collect();
+                if self.data.recording_mbids != ids {
+                    self.data.recording_mbids = ids;
+                    self.data.mbids_version += 1;
+                    self.search.stale = true;
+                }
             }
             LibraryMsg::ArtistMbids(rows) => {
                 self.data.artist_mbids = crate::source::artists::clean_mbids(rows).into_iter().collect();
@@ -746,7 +815,7 @@ mod tests {
         let server = source(1, &[("Moon Safari", "Air"), ("OK Computer", "Radiohead")]);
         let folder = source(2, &[("Fingerlings", "Andrew Bird"), ("Kid A", "Radiohead")]);
         let mut merged = Data::default();
-        merged.merge_sources(&[&server, &folder]);
+        merged.merge_sources(&[&server, &folder], false);
         let names: Vec<&str> = merged.albums.iter().map(|a| a.name.as_str()).collect();
         assert_eq!(names, ["Moon Safari", "Fingerlings", "Kid A", "OK Computer"]);
     }
@@ -775,14 +844,14 @@ mod tests {
         let mut server = source(1, &[("La Femme d'Argent", "Moon Safari", "Air", 1), ("Airbag", "OK Computer", "Radiohead", 1)]);
         let mut folder = source(2, &[("Sovay", "Fingerlings", "Andrew Bird", 1), ("Everything in Its Right Place", "Kid A", "Radiohead", 1)]);
         let mut merged = Data::default();
-        merged.merge_sources(&[&server, &folder]);
+        merged.merge_sources(&[&server, &folder], false);
         let titles: Vec<&str> = merged.tracks.all.iter().map(|t| t.title.as_str()).collect();
         assert_eq!(titles, ["La Femme d'Argent", "Sovay", "Everything in Its Right Place", "Airbag"]);
 
         // Memo: unrelated version changes or repeated merges keep `tracks.all` intact.
         let cached = Arc::clone(&merged.tracks.all);
         server.artists_version += 1;
-        merged.merge_sources(&[&server, &folder]);
+        merged.merge_sources(&[&server, &folder], false);
         assert!(Arc::ptr_eq(&cached, &merged.tracks.all));
 
         // Adding a track to one source interleaves it without disturbing single-source reuse.
@@ -797,7 +866,7 @@ mod tests {
         let mut next = folder.tracks.all.to_vec();
         next.push(extra);
         folder.set_tracks(TrackSet::new(next));
-        merged.merge_sources(&[&server, &folder]);
+        merged.merge_sources(&[&server, &folder], false);
         let titles: Vec<&str> = merged.tracks.all.iter().map(|t| t.title.as_str()).collect();
         assert_eq!(titles, ["La Femme d'Argent", "Sovay", "Everything in Its Right Place", "Idioteque", "Airbag"]);
 
@@ -805,13 +874,13 @@ mod tests {
         let mut renamed = server.albums.to_vec();
         renamed[1].name = "A OK Computer".into();
         server.set_albums(renamed);
-        merged.merge_sources(&[&server, &folder]);
+        merged.merge_sources(&[&server, &folder], false);
         let titles: Vec<&str> = merged.tracks.all.iter().map(|t| t.title.as_str()).collect();
         assert_eq!(titles, ["La Femme d'Argent", "Sovay", "Airbag", "Everything in Its Right Place", "Idioteque"]);
 
         // Single source keeps its own `tracks.all` without copying.
         let mut single = Data::default();
-        single.merge_sources(&[&server]);
+        single.merge_sources(&[&server], false);
         assert!(Arc::ptr_eq(&single.tracks.all, &server.tracks.all));
     }
 
@@ -852,5 +921,28 @@ mod tests {
         let at = Arc::as_ptr(&data.albums);
         data.update_album(album("b", "Second"));
         assert_eq!(Arc::as_ptr(&data.albums), at);
+    }
+
+    #[test]
+    fn a_combined_projection_empties_when_no_sources_remain() {
+        let source = |n: u32| {
+            let account: accounts::AccountId = format!("00000000-0000-4000-8000-{n:012x}").parse().unwrap();
+            let id = accounts::ItemKey::new(account, "album").to_string();
+            let mut data = Data { account: Some(account), ..Default::default() };
+            data.set_albums(vec![Album { artist: Some("Artist".into()), ..album(&id, "Record") }]);
+            data.set_all_tracks(vec![crate::test_tracks::track(&accounts::ItemKey::new(account, "song").to_string(), &id, "Song")]);
+            data
+        };
+        let one = source(1);
+        let two = source(2);
+        let mut merged = Data::default();
+        merged.merge_sources(&[&one, &two], true);
+        assert_eq!((merged.albums.len(), merged.tracks.all.len()), (1, 1));
+        merged.merge_sources(&[], true);
+        assert!(merged.albums.is_empty());
+        assert!(merged.tracks.all.is_empty());
+        assert!(merged.artists.is_empty());
+        assert!(merged.album_copies.is_empty());
+        assert!(merged.track_copies.is_empty());
     }
 }

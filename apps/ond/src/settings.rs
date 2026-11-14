@@ -273,6 +273,9 @@ pub struct Settings {
     /// Which sources are active in the UI (defaults to `all: true`).
     #[serde(default, skip_serializing_if = "is_default_scope")]
     pub scope: accounts::Scope,
+    /// Combine matching albums and songs in scopes with several sources.
+    #[serde(default)]
+    pub combine_copies: bool,
     /// Size cap for the streaming cache; `None` uses the default (2 GB).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stream_cache_mb: Option<u64>,
@@ -518,6 +521,7 @@ impl Default for Settings {
         Self {
             sources: Vec::new(),
             scope: accounts::Scope::default(),
+            combine_copies: false,
             stream_cache_mb: None,
             output_device: None,
             device_modes: Default::default(),

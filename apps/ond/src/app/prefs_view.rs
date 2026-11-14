@@ -17,6 +17,7 @@ use crate::window::WindowMode;
 #[derive(Debug, Clone, PartialEq)]
 pub struct PrefsView {
     pub scope: accounts::Scope,
+    pub combine_copies: bool,
     /// Each source's name and colour, once there's more than one.
     pub sources: super::source_look::SourceMarks,
     /// Full, Player or Mini.
@@ -78,6 +79,7 @@ impl PrefsView {
         let (server_managed, username_managed) = (prefs.managed("server") || prefs.managed("sources"), prefs.managed("username") || prefs.managed("sources"));
         prefs.get(|s| Self {
             scope: s.scope.clone(),
+            combine_copies: s.combine_copies,
             sources: super::source_look::SourceMarks::read(s),
             mode: s.window.mode,
             lyrics_open: s.window.lyrics_open,
@@ -127,6 +129,9 @@ pub enum PrefsAction {
     /// The alphabet rail beside long lists.
     AlphaRail(bool),
     ArtistPhotos(bool),
+    /// The Sources row is added by the combined-album UI pass.
+    #[allow(dead_code)]
+    CombineCopies(bool),
     AlbumView(crate::settings::ViewMode),
     ArtistView(crate::settings::ViewMode),
     Scrobble(bool),
@@ -159,6 +164,7 @@ impl OndApp {
                 PrefsAction::Waveform(_) => "waveform",
                 PrefsAction::AlphaRail(_) => "alpha_rail",
                 PrefsAction::ArtistPhotos(_) => "artist_photos",
+                PrefsAction::CombineCopies(_) => "combine_copies",
                 PrefsAction::Scrobble(_) => "scrobble",
                 PrefsAction::Diagnostics(_) => "diagnostics_bar",
                 // A managed server is the Nix config's, name and all.
@@ -215,6 +221,10 @@ impl OndApp {
             PrefsAction::WaveformBars(bars) => self.prefs.edit(|s| s.waveform_bars = bars),
             PrefsAction::AlphaRail(on) => self.prefs.edit(|s| s.alpha_rail = on),
             PrefsAction::ArtistPhotos(on) => self.prefs.edit(|s| s.artist_photos = on),
+            PrefsAction::CombineCopies(on) => {
+                self.prefs.edit(|s| s.combine_copies = on);
+                self.project_sources();
+            }
             PrefsAction::AlbumView(v) => self.prefs.edit(|s| s.album_view = v),
             PrefsAction::ArtistView(v) => self.prefs.edit(|s| s.artist_view = v),
             PrefsAction::Scrobble(on) => {

@@ -27,6 +27,7 @@ pub(super) struct AllSources {
     artist_catalog: crate::memo::Memo<Vec<(AccountId, u64, u64)>, Vec<crate::source::artists::MergedArtist>>,
     pub(super) projection: Option<Vec<(AccountId, u64)>>,
     scope: Scope,
+    combine_copies: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -190,6 +191,8 @@ impl OndApp {
                             | LibraryMsg::Saved(_)
                             | LibraryMsg::Credited { .. }
                             | LibraryMsg::ArtistMbids(_)
+                            | LibraryMsg::AlbumMbids(_)
+                            | LibraryMsg::RecordingMbids(_)
                     )
                 );
                 let mut data = self.multi.data.remove(&account).unwrap_or_default();
@@ -282,13 +285,27 @@ impl OndApp {
 
     pub(super) fn project_sources(&mut self) {
         let scope = self.session.scope.clone();
-        let key: Vec<_> =
-            self.multi.data.keys().filter(|a| scope.includes(**a)).map(|a| (*a, self.multi.revisions.get(a).copied().unwrap_or_default())).collect();
-        if self.multi.projection.as_ref() == Some(&key) && self.multi.scope == scope {
+        let settings = self.prefs.snapshot();
+        let combine = settings.combine_copies;
+        let accounts: Vec<_> = if combine {
+            settings.sources.iter().map(|s| s.id).filter(|a| self.multi.data.contains_key(a)).collect()
+        } else {
+            self.multi.data.keys().copied().collect()
+        };
+        let key: Vec<_> = accounts.into_iter().filter(|a| scope.includes(*a)).map(|a| (a, self.multi.revisions.get(&a).copied().unwrap_or_default())).collect();
+        if self.multi.projection.as_ref() == Some(&key) && self.multi.scope == scope && self.multi.combine_copies == combine {
             return;
         }
+        let route_copies = match self.ui.nav.current() {
+            Route::Album(id) => self.data.copies_of_album(id),
+            _ => Vec::new(),
+        };
         let sources: Vec<&Data> = key.iter().map(|(a, _)| &self.multi.data[a]).collect();
-        self.data.merge_sources(&sources);
+        self.data.merge_sources(&sources, combine);
+        if let Some(lead) = route_copies.iter().map(ToString::to_string).map(|id| self.data.album_lead(&id).to_owned()).find(|id| self.data.album(id).is_some())
+        {
+            self.ui.nav.go(Route::Album(lead));
+        }
         self.data.playlists.retain(|p| !p.id.starts_with("ond:"));
         self.data.playlists.extend(
             self.multi
@@ -303,6 +320,7 @@ impl OndApp {
         self.data.remember_artist_members(&catalog);
         self.multi.projection = Some(key);
         self.multi.scope = scope.clone();
+        self.multi.combine_copies = combine;
         self.favorites.set_scope(scope);
         self.search.stale = true;
         // Advance the generation now so an earlier build can't install over the
@@ -1701,5 +1719,349 @@ mod tests {
         }
 
         *h.state_mut() = None;
+    }
+
+    fn inject_copy(app: &mut OndApp, source: AccountId, title: &str, release: Option<&str>, numbers: &[u32]) {
+        let mut album = fixture::album(0);
+        album.id = "1".into();
+        album.name = title.into();
+        album.artist = Some("The Björk & Friends".into());
+        album.artist_ref = Some("1".into());
+        album.artists.clear();
+        album.year = Some(if source == account(1) { 1999 } else { 2000 });
+        album.song_count = numbers.len() as u32;
+        album.duration_secs = numbers.len() as u32 * 60;
+        let tracks = numbers
+            .iter()
+            .map(|n| library::Track {
+                disc: Some(1),
+                track: Some(*n),
+                duration_secs: Some(60),
+                artist_ref: Some("1".into()),
+                suffix: Some(if source == account(1) { "flac" } else { "mp3" }.into()),
+                bit_rate_kbps: Some(if source == account(1) { 1000 } else { 192 }),
+                bit_depth: Some(16),
+                ..crate::test_tracks::track(&n.to_string(), "1", &format!("Song {n}"))
+            })
+            .collect();
+        for message in [
+            LibraryMsg::Albums(vec![album]),
+            LibraryMsg::AllTracks(Box::new(crate::tracks::TrackSet::new(tracks))),
+            LibraryMsg::AlbumMbids(release.map(|id| vec![("1".into(), id.into())]).unwrap_or_default()),
+            LibraryMsg::RecordingMbids(numbers.iter().map(|n| (n.to_string(), format!("recording-{n}"))).collect()),
+        ] {
+            inject(app, Msg::Source { account: source, session: 0, message: Box::new(message.into()) });
+        }
+    }
+
+    fn combine(app: &mut OndApp, on: bool) {
+        app.apply(Action::Prefs(super::super::PrefsAction::CombineCopies(on)));
+    }
+
+    #[test]
+    fn partial_album_copies_form_a_sorted_union_with_real_song_leads() {
+        let dir = tempfile::tempdir().unwrap();
+        let one = server();
+        let two = server();
+        let mut app = rig(dir.path(), &one, &two);
+        inject_copy(&mut app, account(1), "Record", Some("release"), &[1, 3]);
+        inject_copy(&mut app, account(2), "Record", Some("release"), &[2, 3, 4]);
+        combine(&mut app, true);
+        assert_eq!(app.data.albums.len(), 1);
+        let album = &app.data.albums[0];
+        assert_eq!((album.id.as_str(), album.song_count, album.duration_secs), (key(account(1), "1").as_str(), 4, 240));
+        let songs = app.data.tracks.album(&album.id).unwrap();
+        assert_eq!(songs.iter().map(|s| s.track.unwrap()).collect::<Vec<_>>(), [1, 2, 3, 4]);
+        assert!(songs.iter().all(|s| s.album_id == album.id));
+        assert_eq!(songs[1].id, key(account(2), "2"));
+        assert_eq!(app.data.copies_of_track(&songs[2].id).iter().map(|k| k.account).collect::<Vec<_>>(), [account(1), account(2)]);
+        assert_eq!(app.data.artists[0].album_count, 1);
+        let route = Route::Artist { name: "The Björk & Friends".into(), id: Some(key(account(1), "1")) };
+        assert_eq!(super::super::browse::grid_ids(&route, super::super::AlbumSort::Year, false, &app.data).len(), 1);
+        app.rebuild_search();
+        let index = app.search.index.as_ref().unwrap();
+        assert_eq!((index.albums.len(), index.tracks.len()), (1, 4));
+    }
+
+    #[test]
+    fn complete_duplicates_collapse_but_original_copy_formats_and_rows_remain_available() {
+        let dir = tempfile::tempdir().unwrap();
+        let one = server();
+        let two = server();
+        let mut app = rig(dir.path(), &one, &two);
+        inject_copy(&mut app, account(1), "Record", Some("release"), &[1, 2]);
+        inject_copy(&mut app, account(2), "Record", Some("release"), &[1, 2]);
+        combine(&mut app, true);
+        assert_eq!((app.data.albums.len(), app.data.tracks.all.len()), (1, 2));
+        assert!(app.data.track_copies.values().all(|copies| copies.len() == 2 && copies[0].account == account(1)));
+        let album = key(account(1), "1");
+        assert_eq!(app.data.copies_of_album(&album).iter().map(|k| k.account).collect::<Vec<_>>(), [account(1), account(2)]);
+        assert_eq!(app.data.copies_of_track(&key(account(2), "1")).len(), 2);
+        assert_eq!(app.data.album_copy(&key(account(2), "1")).unwrap().song_count, 2);
+        let formats = app.data.album_copy_formats(&album);
+        assert_eq!(formats.iter().map(|(a, _)| *a).collect::<Vec<_>>(), [account(1), account(2)]);
+        assert_eq!(formats[0].1[0].suffix, Some("flac"));
+        assert!(formats[0].1[0].lossless);
+        assert_eq!(formats[1].1[0].suffix, Some("mp3"));
+        assert_eq!(formats[1].1[0].bitrate_kbps, Some(192));
+        assert!(!formats[1].1[0].lossless);
+        assert_eq!(app.data.track_copy(&key(account(2), "1")).unwrap().album_id, key(account(2), "1"));
+        assert_eq!(app.data.tracks.searchable().iter().count(), 2);
+    }
+
+    #[test]
+    fn conflicting_release_ids_and_deluxe_titles_stay_apart() {
+        let dir = tempfile::tempdir().unwrap();
+        let one = server();
+        let two = server();
+        let mut app = rig(dir.path(), &one, &two);
+        combine(&mut app, true);
+        inject_copy(&mut app, account(1), "Record", Some("one"), &[1]);
+        inject_copy(&mut app, account(2), "Record", Some("two"), &[1]);
+        assert_eq!(app.data.albums.len(), 2);
+        inject_copy(&mut app, account(2), "Record (Deluxe)", None, &[1]);
+        assert_eq!(app.data.albums.len(), 2);
+        assert!(app.data.album_copies.is_empty());
+    }
+
+    #[test]
+    fn blank_copy_ids_fall_back_to_folded_album_and_song_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let one = server();
+        let two = server();
+        let mut app = rig(dir.path(), &one, &two);
+        inject_copy(&mut app, account(1), "The RécOrd", Some(""), &[1, 2]);
+        inject_copy(&mut app, account(2), "record", Some("   "), &[1, 2]);
+        for source in [account(1), account(2)] {
+            inject(
+                &mut app,
+                Msg::Source {
+                    account: source,
+                    session: 0,
+                    message: Box::new(LibraryMsg::RecordingMbids(vec![("1".into(), "".into()), ("2".into(), "  ".into())]).into()),
+                },
+            );
+        }
+        combine(&mut app, true);
+        assert_eq!((app.data.albums.len(), app.data.tracks.all.len()), (1, 2));
+        assert!(app.data.album_mbids.is_empty());
+        assert!(app.data.recording_mbids.is_empty());
+    }
+
+    #[test]
+    fn disabling_combination_restores_all_milestone_four_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let one = server();
+        let two = server();
+        let mut app = rig(dir.path(), &one, &two);
+        inject_copy(&mut app, account(1), "Record", Some("release"), &[1, 2]);
+        inject_copy(&mut app, account(2), "Record", Some("release"), &[1, 2]);
+        let before = (app.data.albums.clone(), app.data.tracks.all.clone());
+        combine(&mut app, true);
+        assert_eq!(app.data.albums.len(), 1);
+        combine(&mut app, false);
+        assert_eq!((app.data.albums.as_ref(), app.data.tracks.all.as_ref()), (before.0.as_ref(), before.1.as_ref()));
+        assert!(app.data.album_copies.is_empty());
+        assert!(app.data.track_copies.is_empty());
+        app.rebuild_search();
+        let index = app.search.index.as_ref().unwrap();
+        assert_eq!((index.albums.len(), index.tracks.len()), (2, 4));
+    }
+
+    #[test]
+    fn one_source_chip_and_single_scope_show_that_sources_plain_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let one = server();
+        let two = server();
+        let mut app = rig(dir.path(), &one, &two);
+        inject_copy(&mut app, account(1), "Record", Some("release"), &[1, 3]);
+        inject_copy(&mut app, account(2), "Record", Some("release"), &[2, 3, 4]);
+        combine(&mut app, true);
+        app.ui.nav.go(Route::Album(key(account(1), "1")));
+        app.apply_scope(ScopeAction::Chip(shell::kit::SourceChip::Toggle(account(2))));
+        assert_eq!(app.data.albums.len(), 1);
+        assert_eq!(app.data.albums[0].id, key(account(2), "1"));
+        assert_eq!(app.data.tracks.all.len(), 3);
+        assert!(app.data.album_copies.is_empty());
+        assert!(app.data.track_copies.is_empty());
+        assert_eq!(app.ui.nav.current(), &Route::Album(key(account(2), "1")));
+        app.apply_scope(ScopeAction::One(account(1)));
+        assert_eq!(app.data.albums[0].id, key(account(1), "1"));
+        assert_eq!(app.data.tracks.all.len(), 2);
+    }
+
+    #[test]
+    fn album_and_song_leads_follow_settings_order_and_rebuild_when_it_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let one = server();
+        let two = server();
+        let mut app = rig(dir.path(), &one, &two);
+        inject_copy(&mut app, account(1), "Record", Some("release"), &[1, 2]);
+        inject_copy(&mut app, account(2), "Record", Some("release"), &[1, 2]);
+        app.prefs.edit(|s| s.sources.reverse());
+        combine(&mut app, true);
+        assert_eq!(app.data.albums[0].id, key(account(2), "1"));
+        assert!(app.data.tracks.all.iter().all(|s| identity::account(&s.id) == Some(account(2))));
+        assert!(app.data.track_copies.values().all(|copies| copies[0].account == account(2) && copies[1].account == account(1)));
+        app.ui.nav.go(Route::Album(key(account(2), "1")));
+        let version = app.data.version;
+        app.prefs.edit(|s| s.sources.reverse());
+        app.project_sources();
+        assert!(app.data.version > version);
+        assert_eq!(app.data.albums[0].id, key(account(1), "1"));
+        assert_eq!(app.ui.nav.current(), &Route::Album(key(account(1), "1")));
+        let version = app.data.version;
+        app.project_sources();
+        assert_eq!(app.data.version, version, "unchanged inputs preserve the projection");
+    }
+    fn copy_server(title: &'static str, release: &'static str, numbers: &'static [u32]) -> JsonFake {
+        JsonFake::start(move |request| {
+            let album = json!({"id":"1", "name":title, "artist":"Björk", "artistId":"1", "songCount":numbers.len(), "duration":numbers.len()*60, "musicBrainzId":release});
+            let songs: Vec<_> = numbers.iter().map(|n| json!({"id":n.to_string(), "albumId":"1", "title":format!("Song {n}"), "track":n, "discNumber":1, "duration":60, "musicBrainzId":format!("recording-{n}")})).collect();
+            let body = match request.path() {
+                "/rest/getAlbumList2" => json!({"albumList2":{"album":[album]}}),
+                "/rest/getArtists" => json!({"artists":{"index":[{"name":"B","artist":[{"id":"1", "name":"Björk", "albumCount":1}]}]}}),
+                "/rest/getAlbum" => {
+                    let mut album = album;
+                    album["song"] = json!(songs);
+                    json!({"album":album})
+                }
+                _ => json!({}),
+            };
+            let mut response = json!({"status":"ok","version":"1.16.1"});
+            response.as_object_mut().unwrap().extend(body.as_object().unwrap().clone());
+            Answer::ok(json!({"subsonic-response":response}).to_string())
+        })
+    }
+
+    #[test]
+    fn navidrome_copy_ids_survive_sync_and_reload_without_changing_stored_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let one = copy_server("Record", " release ", &[1, 3]);
+        let two = copy_server("Different spelling", "release", &[2, 3, 4]);
+        let mut app = rig(dir.path(), &one, &two);
+        combine(&mut app, true);
+        for source in [account(1), account(2)] {
+            let bridge = &app.multi.bridges[&source];
+            bridge.sync_source(app.session.accounts[&source].source.as_ref().unwrap());
+        }
+        pump(&mut app, |app| app.data.albums.len() == 1 && app.data.tracks.all.len() == 4 && app.session.accounts.values().all(|s| s.sync.last.is_some()));
+        for source in [account(1), account(2)] {
+            let library = app.multi.bridges[&source].library_handle();
+            let ids = library.saved::<BTreeMap<String, String>>(crate::source::mbids::ALBUMS).unwrap().unwrap();
+            assert_eq!(ids, BTreeMap::from([("1".into(), "release".into())]));
+            let ids = library.saved::<BTreeMap<String, String>>(crate::source::mbids::RECORDINGS).unwrap().unwrap();
+            assert_eq!(ids["3"], "recording-3");
+            assert!(ids.keys().all(|id| identity::account(id).is_none()));
+            assert_eq!(library.albums().unwrap().len(), 1);
+            assert_eq!(library.album("1").unwrap().unwrap().song_count, if source == account(1) { 2 } else { 3 });
+        }
+        let before = app.multi.data[&account(2)].version;
+        for bridge in app.multi.bridges.values() {
+            bridge.load_local(None);
+        }
+        pump(&mut app, |app| app.multi.data[&account(2)].version > before && app.data.albums.len() == 1 && app.data.tracks.all.len() == 4);
+        app.rebuild_search();
+        let index = app.search.index.as_ref().unwrap();
+        assert_eq!((index.albums.len(), index.tracks.len()), (1, 4));
+    }
+
+    #[test]
+    fn navidrome_blank_album_ids_clear_stale_saved_ids_and_match_by_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let one = copy_server("Record", "", &[1, 2]);
+        let two = copy_server("Record", "  ", &[1, 2]);
+        let mut app = rig(dir.path(), &one, &two);
+        for source in [account(1), account(2)] {
+            let bridge = &app.multi.bridges[&source];
+            bridge.library_handle().save(crate::source::mbids::ALBUMS, &BTreeMap::from([("1".to_owned(), format!("stale-{source}"))])).unwrap();
+            bridge.sync_source(app.session.accounts[&source].source.as_ref().unwrap());
+        }
+        pump(&mut app, |app| app.data.tracks.all.len() == 4 && app.session.accounts.values().all(|s| s.sync.last.is_some()));
+        combine(&mut app, true);
+        assert_eq!((app.data.albums.len(), app.data.tracks.all.len()), (1, 2));
+        for source in [account(1), account(2)] {
+            let library = app.multi.bridges[&source].library_handle();
+            assert!(library.saved::<BTreeMap<String, String>>(crate::source::mbids::ALBUMS).unwrap().unwrap().is_empty());
+        }
+    }
+    #[test]
+    fn matching_metadata_updates_rebuild_the_projection_without_frozen_row_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let one = server();
+        let two = server();
+        let mut app = rig(dir.path(), &one, &two);
+        inject_copy(&mut app, account(1), "Record", Some("one"), &[1]);
+        inject_copy(&mut app, account(2), "Record", Some("two"), &[1]);
+        combine(&mut app, true);
+        assert_eq!(app.data.albums.len(), 2);
+        let versions = (app.multi.data[&account(2)].version, app.multi.data[&account(2)].tracks_version);
+        let generation = app.search.generation;
+        inject(&mut app, Msg::Source { account: account(2), session: 0, message: Box::new(LibraryMsg::AlbumMbids(vec![("1".into(), "one".into())]).into()) });
+        assert_eq!(versions, (app.multi.data[&account(2)].version, app.multi.data[&account(2)].tracks_version));
+        assert!(app.search.generation > generation);
+        assert_eq!((app.data.albums.len(), app.data.tracks.all.len()), (1, 1));
+        let changed = library::Track { disc: Some(1), track: Some(1), ..crate::test_tracks::track("1", "1", "Another song") };
+        // First the recording still joins differently titled songs, then only
+        // changing its identity splits them without another frozen-row update.
+        inject(
+            &mut app,
+            Msg::Source {
+                account: account(2),
+                session: 0,
+                message: Box::new(LibraryMsg::AllTracks(Box::new(crate::tracks::TrackSet::new(vec![changed]))).into()),
+            },
+        );
+        assert_eq!(app.data.tracks.all.len(), 1);
+        let tracks_version = app.multi.data[&account(2)].tracks_version;
+        inject(
+            &mut app,
+            Msg::Source {
+                account: account(2),
+                session: 0,
+                message: Box::new(LibraryMsg::RecordingMbids(vec![("1".into(), "another-recording".into())]).into()),
+            },
+        );
+        assert_eq!(app.multi.data[&account(2)].tracks_version, tracks_version);
+        assert_eq!(app.data.tracks.all.len(), 2);
+    }
+
+    #[test]
+    fn chips_filter_three_copies_before_choosing_a_lead_and_building_the_union() {
+        let dir = tempfile::tempdir().unwrap();
+        let one = server();
+        let two = server();
+        let mut app = rig(dir.path(), &one, &two);
+        let third = SourceEntry::subsonic(account(3), one.base(), "third");
+        app.prefs.edit(|s| s.sources.push(third));
+        app.multi.bridges.insert(account(3), app.bridge.fork_source(account(3), Arc::new(library::Library::in_memory().unwrap())));
+        app.session.accounts.insert(account(3), Default::default());
+        inject_copy(&mut app, account(1), "Record", Some("release"), &[1, 2]);
+        inject_copy(&mut app, account(2), "Record", Some("release"), &[2, 3]);
+        inject_copy(&mut app, account(3), "Record", Some("release"), &[3, 4]);
+        combine(&mut app, true);
+        assert_eq!((app.data.albums.len(), app.data.tracks.all.len()), (1, 4));
+        assert_eq!(app.data.copies_of_album(&app.data.albums[0].id).len(), 3);
+        app.apply_scope(ScopeAction::Chip(shell::kit::SourceChip::Toggle(account(2))));
+        app.apply_scope(ScopeAction::Chip(shell::kit::SourceChip::Toggle(account(3))));
+        let album = &app.data.albums[0];
+        assert_eq!((album.id.as_str(), album.song_count), (key(account(2), "1").as_str(), 3));
+        assert_eq!(app.data.copies_of_album(&album.id).iter().map(|k| k.account).collect::<Vec<_>>(), [account(2), account(3)]);
+        assert_eq!(app.data.tracks.album(&album.id).unwrap().iter().map(|s| s.track.unwrap()).collect::<Vec<_>>(), [2, 3, 4]);
+        assert_eq!(app.data.artists[0].album_count, 1);
+        assert!(app.data.track_copies.values().all(|copies| copies.iter().all(|k| k.account != account(1))));
+    }
+    #[test]
+    fn combine_copies_defaults_off_and_a_managed_value_locks_its_action() {
+        assert!(!Settings::default().combine_copies);
+        assert!(!Settings::from_json("{}".as_bytes()).unwrap().combine_copies);
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("managed.json"), r#"{"combine_copies":true}"#).unwrap();
+        let mut app = fixture::populated(&egui::Context::default(), dir.path());
+        assert!(app.prefs_now().combine_copies);
+        let action = Action::Prefs(super::super::PrefsAction::CombineCopies(false));
+        assert!(app.locked(&action));
+        app.apply(action);
+        assert!(app.prefs_now().combine_copies);
     }
 }

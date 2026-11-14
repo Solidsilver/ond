@@ -67,6 +67,7 @@ local folder sources keep scanning and playing.
 | `waveform_bars.gap` | Space between bars in half points, 1 to 6 | `2` |
 | `alpha_rail` | The alphabet rail beside lists sorted by name | `false` |
 | `artist_photos` | Artists' photos from the server | `true` |
+| `combine_copies` | Combine matching albums and songs across sources | `false` |
 | `window.system_title_bar` | Linux: the desktop's title bar instead of Ond's own buttons | `false` |
 
 ### Playback

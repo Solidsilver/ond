@@ -103,7 +103,7 @@ pub fn message(account: AccountId, msg: crate::bridge::Msg) -> crate::bridge::Ms
         Msg::Scoped { session, message: inner } => Msg::Scoped { session, message: Box::new(message(account, *inner)) },
         Msg::Library(mut m) => {
             match &mut m {
-                L::ArtistMbids(rows) => {
+                L::ArtistMbids(rows) | L::AlbumMbids(rows) | L::RecordingMbids(rows) => {
                     for (id, _) in rows {
                         q(id);
                     }
