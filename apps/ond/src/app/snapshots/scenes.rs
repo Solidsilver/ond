@@ -1248,9 +1248,104 @@ fn source_scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
     app_mut(h).actions.push(Action::OpenSettings(settings_page::Section::Sources));
     s.shoot(h, "sources-settings");
 
+    // The menu closed: the switcher flags the server it can't reach.
+    reset(h, FULL, Route::Albums);
+    unreachable(h);
+    h.run_steps(2);
+    s.shoot(h, "sources-unreachable-flag");
+    for source in app_mut(h).session.accounts.values_mut() {
+        source.online = true;
+        source.unreachable = false;
+        source.skipped = 0;
+    }
+
     // The folded rail: the stacked dots alone.
     reset(h, vec2(760.0, 700.0), Route::Albums);
     s.shoot(h, "sources-rail");
+
+    // Three sources, the chips narrowed to two: the switcher names them,
+    // and its menu ticks their boxes.
+    let office: accounts::AccountId = "00000000-0000-4000-8000-0000000ff1ce".parse().unwrap();
+    {
+        let app = app_mut(h);
+        let mut entry = crate::settings::SourceEntry::subsonic(office, "https://office.example.com", "demo");
+        entry.name = Some("Office".into());
+        entry.color = accounts::SourceColor::new(4);
+        app.prefs.edit(|s| s.sources.push(entry.clone()));
+        let session = super::super::session::SourceSession {
+            online: true,
+            settings: Some(Settings { sources: vec![entry], ..Default::default() }),
+            ..Default::default()
+        };
+        app.session.accounts.insert(office, session);
+    }
+    reset(h, FULL, Route::Albums);
+    for account in [crate::test_tracks::account(), local_account()] {
+        app_mut(h).actions.push(Action::Scope(all_sources::ScopeAction::Chip(shell::kit::SourceChip::Toggle(account))));
+        h.run_steps(2);
+    }
+    // The sidebar's usual width has room for the count; a wider one, for
+    // the names.
+    s.shoot(h, "sources-narrowed-count");
+    reset(h, FULL, Route::Albums);
+    app_mut(h).prefs.edit(|p| p.sidebar_width = Some(300.0));
+    s.shoot(h, "sources-narrowed");
+    h.get_by_role_and_label(egui::accesskit::Role::Button, "Home server, Music folder, 2 of 3 sources").click();
+    h.run_steps(2);
+    h.event(egui::Event::PointerGone);
+    s.shoot(h, "sources-narrowed-menu");
+    egui::Popup::close_all(&h.ctx);
+    {
+        let app = app_mut(h);
+        app.actions.push(Action::Scope(all_sources::ScopeAction::All));
+        app.prefs.edit(|s| s.sources.retain(|e| e.id != office));
+        app.session.accounts.remove(&office);
+    }
+    h.run_steps(2);
+
+    // The queue holds songs from both: each row's dot follows its artist.
+    reset(h, FULL, Route::Songs);
+    for (i, item) in app_mut(h).player.queue.upcoming.iter_mut().enumerate() {
+        if i % 2 == 1 {
+            item.key.account = local_account();
+        }
+    }
+    s.shoot(h, "sources-queue");
+
+    // An Ond playlist holding songs from both carries both dots, on the
+    // Playlists page and in the sidebar, and its songs get a Source column.
+    {
+        let app = app_mut(h);
+        let tracks: Vec<library::Track> = app.data.tracks.all.iter().step_by(7).take(8).cloned().collect();
+        let playlist = crate::source::Playlist {
+            id: "ond:mixed".into(),
+            name: "Both at once".into(),
+            song_count: tracks.len() as u32,
+            duration: tracks.iter().filter_map(|t| t.duration_secs).sum(),
+            cover_art: None,
+            owner: None,
+        };
+        app.multi.ond_playlists.push(playlist);
+        app.multi.ond_tracks.insert("ond:mixed".into(), std::sync::Arc::new(tracks));
+        app.multi.projection = None;
+        app.project_sources();
+    }
+    reset(h, FULL, Route::Playlists);
+    s.shoot(h, "sources-playlists");
+    reset(h, FULL, Route::Playlist { id: "ond:mixed".into(), name: "Both at once".into() });
+    s.shoot(h, "sources-playlist");
+
+    // Mini: the playing song's dot after its artist.
+    reset(h, vec2(280.0, 280.0), Route::Recent);
+    app_mut(h).edit_windows(|w| w.mode = WindowMode::Mini);
+    h.hover_at(pos2(140.0, 140.0));
+    h.run_steps(6);
+    s.shoot(h, "sources-mini-hover");
+
+    // The Player: the same dot after the artist.
+    reset(h, vec2(380.0, 880.0), Route::Recent);
+    app_mut(h).edit_windows(|w| w.mode = WindowMode::Player);
+    s.shoot(h, "sources-player");
 }
 
 /// Settings with some set in managed.json (as the Home Manager module writes
