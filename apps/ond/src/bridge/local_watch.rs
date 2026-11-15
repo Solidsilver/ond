@@ -10,7 +10,11 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::watch;
 
-const SETTLE: Duration = Duration::from_secs(2);
+/// How long a folder must be quiet before it's rescanned. Tests use less:
+/// at two seconds a test that unplugs and replugs a folder spends most of
+/// its wait budget here, and times out when the suite runs in parallel.
+/// Their bursts are a tight loop of copies, well inside the shorter window.
+const SETTLE: Duration = if cfg!(test) { Duration::from_millis(500) } else { Duration::from_secs(2) };
 
 pub(super) struct LocalWatch {
     source: Src,
