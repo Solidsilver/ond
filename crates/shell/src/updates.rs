@@ -445,6 +445,7 @@ impl Updates {
     }
 
     pub fn cancel_install(&mut self) {
+        self.installation.relaunch = false;
         self.installation.generation = self.installation.generation.wrapping_add(1);
         if let Some(job) = self.installation.job.take() {
             drop(job);
@@ -479,12 +480,21 @@ impl Updates {
         }
     }
 
+    /// Marks an explicit restart before the app requests its normal close.
+    /// A plain quit installs without reopening, including after rollback.
+    pub fn request_restart(&mut self) -> bool {
+        let ready = self.install.ready();
+        self.installation.relaunch = ready;
+        ready
+    }
+
     /// Playback must already have stopped through the app's normal quit path.
     pub fn install_on_quit(&mut self) -> Result<(), install::Error> {
+        let relaunch = std::mem::take(&mut self.installation.relaunch);
         if self.install.ready()
             && let install::State::Ready { prepared, .. } = std::mem::take(&mut self.install)
         {
-            prepared.install()?;
+            prepared.install(relaunch)?;
         }
         self.cancel_install();
         Ok(())

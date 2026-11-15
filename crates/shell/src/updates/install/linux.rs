@@ -60,6 +60,6 @@ pub(super) fn prepare(stage: Stage, plan: Plan, app: &Releases) -> Result<Prepar
     Ok(Prepared { stage, replacement, plan, neighbor: Some(neighbor) })
 }
 
-pub(super) fn install(prepared: Prepared) -> Result<(), Error> {
-    super::unix::install(prepared, "binary")
+pub(super) fn install(prepared: Prepared, relaunch: bool) -> Result<(), Error> {
+    super::unix::install(prepared, if relaunch { "binary" } else { "none" })
 }

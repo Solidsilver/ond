@@ -366,3 +366,54 @@ fn the_layout_helper_runs_the_archives_installer_and_rolls_back_a_failure() {
         assert!(!stage.exists());
     }
 }
+
+#[test]
+#[cfg(unix)]
+fn the_helper_relaunches_only_for_restart_on_success_and_after_rollback() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::Command;
+    for relaunch in [false, true] {
+        for fail in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let target = dir.path().join("app with spaces");
+            let replacement = dir.path().join("new");
+            let neighbor = dir.path().join("neighbor");
+            let stage = dir.path().join("stage-fixture");
+            fs::create_dir(&neighbor).unwrap();
+            fs::create_dir(&stage).unwrap();
+            for (path, version) in [(&target, "old"), (&replacement, "new")] {
+                if fail && path == &replacement {
+                    continue;
+                }
+                fs::write(path, format!("#!/bin/sh\nprintf {version} > \"$0.started\"\n")).unwrap();
+                fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+            }
+            // Wait for any launched child before asserting that Quit launched
+            // nothing; otherwise a background exec could race the assertion.
+            let script = format!("trap 'result=$?; wait; exit \"$result\"' EXIT\n{}", super::unix::SCRIPT);
+            let result = Command::new("/bin/sh")
+                .arg("-c")
+                .arg(script)
+                .arg("update-test")
+                .arg("0")
+                .arg(&target)
+                .arg(&replacement)
+                .arg(neighbor.join("previous"))
+                .arg(&stage)
+                .arg(&neighbor)
+                .arg("swap")
+                .arg("")
+                .arg(if relaunch { "binary" } else { "none" })
+                .status()
+                .unwrap();
+            assert_eq!(result.success(), !fail);
+            let marker = PathBuf::from(format!("{}.started", target.display()));
+            if relaunch {
+                wait_until("the relaunched fake app", || marker.exists());
+                assert_eq!(fs::read_to_string(marker).unwrap(), if fail { "old" } else { "new" });
+            } else {
+                assert!(!marker.exists());
+            }
+        }
+    }
+}

@@ -140,13 +140,13 @@ pub struct Prepared {
 impl Prepared {
     /// Called only after the app's normal playback shutdown. Unix helpers
     /// wait for process exit as well, before changing the installation.
-    pub fn install(self) -> Result<(), Error> {
+    pub fn install(self, relaunch: bool) -> Result<(), Error> {
         #[cfg(target_os = "macos")]
-        return macos::install(self);
+        return macos::install(self, relaunch);
         #[cfg(target_os = "linux")]
-        return linux::install(self);
+        return linux::install(self, relaunch);
         #[cfg(target_os = "windows")]
-        return windows::install(self);
+        return windows::install(self, relaunch);
         #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
         Err(Error::Archive)
     }
@@ -245,6 +245,7 @@ pub(super) fn start(
 pub struct Installation {
     pub(super) job: Option<Job>,
     pub(super) generation: u64,
+    pub(super) relaunch: bool,
 }
 
 pub(super) struct Job(tokio::task::JoinHandle<()>);

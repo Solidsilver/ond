@@ -153,13 +153,15 @@ not claims that signed production updates have been installed successfully:
   `/Applications`: expect a typed fallback and no stage left behind.
 - [ ] On macOS, test both architectures and a cache on a different volume.
   Restart to Update and ordinary Quit must stop audible playback and release
-  the device before the helper swaps the bundle and reopens it. Test a failed
+  the device before the helper swaps the bundle. Restart must reopen it; plain
+  Quit must stay closed, including after a failed update is rolled back. Test a failed
   destination move and a failed rollback; retain the backup location reported
   at the next launch. Gatekeeper/notarization and `open` need real bundles.
 - [ ] On Linux x86_64 and ARM64, test both install.sh layouts (`~/.local`, and
   an unwritable `/usr/local`) plus a loose unpacked binary. Installation should
   refresh desktop entries/icons for a prefix, preserve the old binary on
-  failure and relaunch the correct path. Test Restart and Quit while playing.
+  failure and relaunch the correct path only for Restart. Test Restart and Quit
+  while playing; ordinary Quit must stay closed even after rollback.
 - [ ] On Windows x86_64, test Ond's executable rename/relaunch on a real desktop,
   `.old` cleanup after the previous process exits, a read-only directory and a
   failed replacement/relaunch with rollback. Rede has no Windows release and

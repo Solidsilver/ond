@@ -19,7 +19,7 @@ Only copies built by the release workflow look (`OND_DISTRIBUTION` / `REDE_DISTR
 1. **Fetch.** A newer version is found on the followed channel and isn't skipped. The app downloads this platform's file from the release, and that file's `.minisig`, into a staging folder in its cache directory. A half-finished download is never installed.
 2. **Verify.** The signature is checked against the public key built into the app ([Signing](#signing)). A file that fails is deleted and the failure is shown. The app never installs anything unsigned, and never falls back to installing without the check.
 3. **Ready.** Settings › About and the update notice say the update is ready, with Restart to Update.
-4. **Install.** On quit, or on Restart to Update, the platform's installer runs. Nothing is replaced while the app is playing. Restart to Update stops playback first, the same way quitting does.
+4. **Install.** On quit, or on Restart to Update, the platform's installer runs. Nothing is replaced while the app is playing. Restart to Update stops playback first, the same way quitting does. A plain quit installs and stays closed; Restart to Update installs and reopens. Rollback follows the same choice.
 5. **Fall back.** If the app can't install itself where it lives (no write permission, run from a disk image, an unknown layout), it says so and behaves as `notify`. The staged file is removed.
 
 Staged files are deleted once installed, when a newer version replaces them, and when the user skips that version.
@@ -40,7 +40,7 @@ The `.zip` holds the signed, notarized, stapled `.app` (`ditto -c -k --keepParen
 
 1. Unpack it with `ditto -x -k` next to the staged file.
 2. Check it with `codesign --verify --deep --strict`. Its Team ID must match the running app's. An ad-hoc-signed running app (built without the signing secrets) skips the Team ID check but still requires minisign.
-3. Start a detached helper (`/bin/sh` is enough) and quit. The helper waits for the app's process to exit, renames the old bundle aside, moves the new one into its place, deletes the old one, and reopens the app with `open`. If the move fails, it puts the old bundle back.
+3. Start a detached helper (`/bin/sh` is enough) and quit. The helper waits for the app's process to exit, renames the old bundle aside, moves the new one into its place, deletes the old one, and, only for Restart to Update, reopens the app with `open`. If the move fails, it puts the old bundle back.
 
 Files fetched by the app itself carry no quarantine attribute, so Gatekeeper doesn't ask again. Two cases fall back to `notify`:
 
@@ -49,7 +49,7 @@ Files fetched by the app itself carry no quarantine attribute, so Gatekeeper doe
 
 ### Linux
 
-`install.sh` puts the binary at `<prefix>/bin/<app>` and the menu entry at `<prefix>/share/applications/dev.solidsilver.<app>.desktop`. If the running binary sits in such a layout, the app unpacks the new archive and runs its `install.sh <prefix>` on quit, which also refreshes the menu entry and icons. Otherwise (a binary run where it was unpacked) it replaces the binary alone, using a rename, which is safe while the binary is running. A prefix the user can't write to (`/usr/local`) falls back to `notify`. The app restarts from `<prefix>/bin/<app>`.
+`install.sh` puts the binary at `<prefix>/bin/<app>` and the menu entry at `<prefix>/share/applications/dev.solidsilver.<app>.desktop`. If the running binary sits in such a layout, the app unpacks the new archive and runs its `install.sh <prefix>` on quit, which also refreshes the menu entry and icons. Otherwise (a binary run where it was unpacked) it replaces the binary alone, using a rename, which is safe while the binary is running. A prefix the user can't write to (`/usr/local`) falls back to `notify`. Restart to Update reopens `<prefix>/bin/<app>` (or the loose binary); a plain quit stays closed.
 
 ### Windows
 
@@ -76,7 +76,9 @@ The shared drawing code has not yet changed for installation. Both apps route
 `UpdateAction::Check(UpdateCheck::Install)` in the existing update control,
 `UpdateAction::Restart` when ready, and `UpdateAction::Retry` after a failure.
 Restart requests the normal window close; each app's quit handler stops its
-playback engine before calling `Updates::install_on_quit`.
+playback engine before calling `Updates::install_on_quit`. Both apps call
+`Updates::request_restart` for Restart to Update, carrying the relaunch choice
+through the installer. Ordinary quits leave that choice off.
 
 Read `Updates::install` (`shell::updates::install::State`):
 

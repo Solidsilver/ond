@@ -43,7 +43,7 @@ pub(super) fn cleanup() {
     }
 }
 
-pub(super) fn install(prepared: Prepared) -> Result<(), Error> {
+pub(super) fn install(prepared: Prepared, relaunch: bool) -> Result<(), Error> {
     let Prepared { stage: _stage, replacement, plan, neighbor: _neighbor } = prepared;
     let Plan::Binary(target) = &plan else { return Err(Error::Archive) };
     let old = target.with_extension("exe.old");
@@ -55,7 +55,7 @@ pub(super) fn install(prepared: Prepared) -> Result<(), Error> {
         fs::rename(&old, target)?;
         return Err(error.into());
     }
-    if let Err(error) = Command::new(target).spawn() {
+    if relaunch && let Err(error) = Command::new(target).spawn() {
         fs::remove_file(target)?;
         fs::rename(&old, target)?;
         return Err(error.into());

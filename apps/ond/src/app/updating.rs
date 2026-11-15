@@ -23,7 +23,7 @@ impl OndApp {
                 }
             }
             UpdateAction::Restart => {
-                if self.updates.install.ready() {
+                if self.updates.request_restart() {
                     self.ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                 }
             }

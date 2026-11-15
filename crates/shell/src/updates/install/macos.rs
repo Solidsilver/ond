@@ -47,6 +47,6 @@ fn verify_bundle(bundle: &Path, running: &Path) -> Result<(), Error> {
     Ok(())
 }
 
-pub(super) fn install(prepared: Prepared) -> Result<(), Error> {
-    super::unix::install(prepared, "macos")
+pub(super) fn install(prepared: Prepared, relaunch: bool) -> Result<(), Error> {
+    super::unix::install(prepared, if relaunch { "macos" } else { "none" })
 }
