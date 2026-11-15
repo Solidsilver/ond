@@ -32,6 +32,14 @@ impl Stage {
         Ok(dir)
     }
 
+    /// An empty stage of its own, for UI previews of a ready update.
+    #[cfg(any(test, feature = "preview"))]
+    pub fn preview() -> std::io::Result<Self> {
+        let dir = tempfile::Builder::new().prefix("stage-preview-").tempdir()?;
+        let lock = File::create(dir.path().join("lock"))?;
+        Ok(Self { _lock: lock, archive: dir.path().join("preview"), dir })
+    }
+
     #[cfg(any(unix, test))]
     pub fn keep(self) -> PathBuf {
         self.dir.keep()

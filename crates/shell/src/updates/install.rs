@@ -148,6 +148,10 @@ impl Prepared {
     /// Called only after the app's normal playback shutdown. Unix helpers
     /// wait for process exit as well, before changing the installation.
     pub fn install(self, relaunch: bool) -> Result<(), Error> {
+        #[cfg(any(test, feature = "preview"))]
+        if self.replacement.as_os_str().is_empty() {
+            return Err(Error::Worker("a preview can't be installed".into()));
+        }
         #[cfg(target_os = "macos")]
         return macos::install(self, relaunch);
         #[cfg(target_os = "linux")]
@@ -183,6 +187,14 @@ pub enum State {
 }
 
 impl State {
+    /// A ready update for snapshots and UI tests in the apps. It has nothing
+    /// to install: its empty replacement makes [`Prepared::install`] refuse.
+    #[cfg(any(test, feature = "preview"))]
+    pub fn preview_ready(version: Version) -> Self {
+        let stage = stage::Stage::preview().expect("a temporary folder for the preview's stage");
+        Self::Ready { version, prepared: Prepared { stage, replacement: PathBuf::new(), plan: Plan::Binary(PathBuf::new()), neighbor: None } }
+    }
+
     pub fn version(&self) -> Option<&Version> {
         match self {
             Self::Idle => None,
