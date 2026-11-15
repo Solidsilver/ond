@@ -7,6 +7,12 @@ use crate::settings::{Account, LibraryFilter, LibrarySort};
 use accounts::Scope;
 
 pub struct PrefsView {
+    #[cfg_attr(not(test), expect(dead_code, reason = "the update UI is added separately"))]
+    pub updates: crate::settings::UpdateCheck,
+    #[cfg_attr(not(test), expect(dead_code, reason = "the update UI is added separately"))]
+    pub update_channel: Option<crate::settings::UpdateChannel>,
+    #[cfg_attr(not(test), expect(dead_code, reason = "the update UI is added separately"))]
+    pub skipped_update: Option<String>,
     pub accounts: Vec<Account>,
     pub scope: Scope,
     pub sort: LibrarySort,
@@ -25,6 +31,9 @@ pub struct PrefsView {
 impl PrefsView {
     pub fn read(prefs: &Prefs) -> Self {
         prefs.get(|s| Self {
+            updates: s.updates,
+            update_channel: s.update_channel,
+            skipped_update: s.skipped_update.clone(),
             accounts: s.accounts.clone(),
             scope: s.scope.clone(),
             sort: s.sort,
@@ -42,6 +51,8 @@ impl PrefsView {
 /// [`RedeApp::apply_prefs`](super::RedeApp).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum PrefsAction {
+    Updates(crate::settings::UpdateCheck),
+    UpdateChannel(Option<crate::settings::UpdateChannel>),
     /// The library's order.
     Sort(LibrarySort),
     /// A book marked finished, or heard to the end, loses its download.

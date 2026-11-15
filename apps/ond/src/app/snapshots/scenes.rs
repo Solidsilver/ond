@@ -504,17 +504,17 @@ fn scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
     // OND_DISTRIBUTION=github).
     reset(h, FULL, Route::Recent);
     let v = crate::updates::Version::parse("0.5.0").unwrap();
-    app_mut(h).update = Some(v);
-    app_mut(h).updates.latest = Some(v);
+    app_mut(h).update = Some(v.clone());
+    app_mut(h).updates.latest = Some(v.clone());
     s.shoot(h, "update-available");
     reset(h, vec2(720.0, 600.0), Route::Recent);
-    app_mut(h).update = Some(v);
+    app_mut(h).update = Some(v.clone());
     s.shoot(h, "update-available-rail");
     reset(h, FULL, Route::Recent);
-    app_mut(h).update = Some(v);
-    app_mut(h).updates.latest = Some(v);
+    app_mut(h).update = Some(v.clone());
+    app_mut(h).updates.latest = Some(v.clone());
     app_mut(h).updates.notes = Some((
-        v,
+        v.clone(),
         Some(Ok(vec![
             crate::updates::Block::Paragraph("Ond is signed, and Settings has an About page.".into()),
             crate::updates::Block::Heading("Updates".into()),

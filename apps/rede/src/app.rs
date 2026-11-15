@@ -30,6 +30,7 @@
 //! - `palette` and `search`: ⌘K, finding a book in the library in memory
 //! - `sheets`: the keyboard shortcuts, Settings and the sign-out question,
 //!   over the window
+//! - `updating`: app releases, channel choice and update notices
 //! - `settings_page`: Settings' tabs and what's on them (⌘,)
 //! - `manage`: what the Sources tab does to an account (rename, recolour,
 //!   sign out, remove)
@@ -92,6 +93,7 @@ mod sleep;
 mod stats_page;
 mod title_bar;
 mod ui_state;
+mod updating;
 mod view_ctx;
 mod virtual_list;
 mod window;
@@ -121,6 +123,7 @@ pub use nav::Route;
 pub use prefs_view::{PrefsAction, PrefsView};
 pub use session::{LoginForm, Session};
 pub use ui_state::{Notice, SyncState, UiState};
+pub use updating::{UpdateAction, Updates};
 
 /// The app's tokio runtime, kept for the app's lifetime (the bridge holds a
 /// handle to it).
@@ -179,6 +182,9 @@ pub enum Action {
     Source(manage::SourceAction),
     /// The library's order, and anything else a setting changes.
     Prefs(PrefsAction),
+    /// Update controls are drawn by the About page and the update notice.
+    #[cfg_attr(not(test), expect(dead_code, reason = "the update UI is added separately"))]
+    Update(UpdateAction),
     PlayBook(String),
     /// Keep the book on this computer: its details are fetched first, then
     /// the store queues its files.
@@ -303,6 +309,11 @@ pub struct RedeApp {
     stats: crate::stats::State,
     pub bookmarks: bookmarks::State,
     pub reconciliation: Option<crate::listening::Reconciled>,
+    /// A newer, unskipped release eligible for the update notice.
+    pub update: Option<crate::updates::Version>,
+    pub updates: Updates,
+    update_check: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    update_now: std::sync::Arc<tokio::sync::Notify>,
 }
 
 impl RedeApp {
@@ -315,6 +326,8 @@ impl RedeApp {
             app.bridge.media_keys();
             app.bridge.receive_urls();
         }
+        app.update_check.store(app.prefs.get(|s| s.updates) != crate::settings::UpdateCheck::Off, std::sync::atomic::Ordering::Relaxed);
+        app.bridge.start_updates(app.update_check.clone(), app.update_now.clone());
         app.bridge.restore_openid();
         Ok(app)
     }
@@ -406,6 +419,10 @@ impl RedeApp {
             stream_dir: paths.art_cache.with_file_name("streams"),
             downloads: Default::default(),
             stats: Default::default(),
+            update: None,
+            updates: Updates::default(),
+            update_check: Default::default(),
+            update_now: Default::default(),
         })
     }
 
@@ -413,6 +430,7 @@ impl RedeApp {
     /// sign-out are dropped: they belong to an account nobody is using.
     fn handle(&mut self, msg: impl Into<Msg>) {
         match msg.into() {
+            Msg::Update(msg) => self.update_message(msg),
             Msg::Offline { session, event } if session == self.bridge.session() => self.download_event(event),
             Msg::Offline { .. } => {}
             Msg::Account(m) => match m {
@@ -554,6 +572,7 @@ impl RedeApp {
             Action::SyncNow => self.sync_now(),
             Action::Source(a) => self.source_action(a),
             Action::Prefs(a) => self.apply_prefs(a),
+            Action::Update(a) => self.update_action(a),
             Action::DownloadBook(key) => self.download_book(key),
             Action::RemoveDownload(key) => self.remove_download(&key),
             Action::PauseDownloads(paused) => {
@@ -641,6 +660,8 @@ impl RedeApp {
     /// A change to a preference, saved once the burst of changes ends.
     fn apply_prefs(&mut self, action: PrefsAction) {
         match action {
+            PrefsAction::Updates(check) => self.set_update_check(check),
+            PrefsAction::UpdateChannel(channel) => self.set_update_channel(channel),
             PrefsAction::RemoveDownloadsWhenFinished(enabled) => {
                 self.prefs.edit(|s| s.downloads.remove_when_finished = enabled);
                 self.shown.downloads.remove_when_finished = enabled;

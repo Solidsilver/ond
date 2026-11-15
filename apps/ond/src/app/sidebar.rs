@@ -86,7 +86,7 @@ impl OndApp {
                     self.help_button(ui);
                 });
             });
-            if let Some(v) = self.update {
+            if let Some(v) = self.update.clone() {
                 ui.add_space(6.0);
                 self.update_notice(ui, v);
             }
@@ -453,7 +453,7 @@ impl OndApp {
     /// The rail's gear: with a dot while a newer Ond is out, and then it opens
     /// Settings › About.
     fn rail_settings_button(&mut self, ui: &mut Ui) {
-        let Some(v) = self.update else { return self.settings_button(ui) };
+        let Some(v) = self.update.as_ref() else { return self.settings_button(ui) };
         let t = Tokens::of(ui);
         let tip = format!("Settings (⌘,)\nOnd {v} is available");
         let button = icons::sized_button(ui, Icon::Gear, &tip, vec2(FOOTER_BUTTON, FOOTER_BUTTON), 15.0, Some(t.muted));

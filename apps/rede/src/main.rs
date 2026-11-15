@@ -26,6 +26,7 @@ mod stats;
 mod sync;
 mod timeline;
 mod tokens;
+mod updates;
 mod widgets;
 mod window;
 

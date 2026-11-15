@@ -109,11 +109,11 @@ impl OndApp {
     /// about the music.
     fn about(&mut self, ui: &mut Ui) {
         let t = Tokens::of(ui);
-        let current = crate::updates::Version::current();
+        let current = crate::updates::current();
         let icon = kit::app_icon(ui.ctx(), "ond", include_bytes!("../../../../packaging/linux/hicolor/256x256/apps/dev.solidsilver.ond.png"));
         kit::about_header(ui, &icon, "Ond", &format!("Version {current}"));
         ui.add_space(20.0);
-        let newer = self.updates.latest.filter(|v| *v > current);
+        let newer = self.updates.latest.clone().filter(|v| *v > current);
         group(ui, "Updates", |ui| match crate::updates::channel() {
             crate::updates::Channel::GitHub => {
                 let on = self.prefs.get(|s| s.updates) != crate::settings::UpdateCheck::Off;
@@ -122,7 +122,7 @@ impl OndApp {
                     let check = if on { crate::settings::UpdateCheck::Notify } else { crate::settings::UpdateCheck::Off };
                     Action::Update(super::UpdateAction::Check(check))
                 });
-                self.update_status(ui, current, newer);
+                self.update_status(ui, current.clone(), newer.clone());
             }
             crate::updates::Channel::Packaged(by) => setting(ui, &format!("Updates come from {by}"), "", |_| ()),
             crate::updates::Channel::Source => setting(ui, "Built from source", "This copy doesn't look for updates.", |_| ()),
@@ -155,10 +155,10 @@ impl OndApp {
             let hint = if skipped { format!("You have {current}. You skipped this version.") } else { format!("You have {current}.") };
             setting(ui, &format!("Ond {v} is available"), &hint, |ui| {
                 if crate::widgets::primary(ui, Some(Icon::Download), "Download").clicked() {
-                    self.actions.push(Action::Update(super::UpdateAction::Open(v)));
+                    self.actions.push(Action::Update(super::UpdateAction::Open(v.clone())));
                 }
                 if !skipped && secondary(ui, "Skip").clicked() {
-                    self.actions.push(Action::Update(super::UpdateAction::Skip(v)));
+                    self.actions.push(Action::Update(super::UpdateAction::Skip(v.clone())));
                 }
             });
             return;
@@ -185,7 +185,7 @@ impl OndApp {
     fn release_notes(&mut self, ui: &mut Ui, v: crate::updates::Version) {
         let t = Tokens::of(ui);
         if self.updates.notes.as_ref().is_none_or(|(n, _)| *n != v) {
-            self.actions.push(Action::Update(super::UpdateAction::Notes(v)));
+            self.actions.push(Action::Update(super::UpdateAction::Notes(v.clone())));
         }
         group(ui, &format!("What's new in {v}"), |ui| {
             ui.spacing_mut().item_spacing.y = 6.0;
@@ -218,7 +218,7 @@ impl OndApp {
             }
             ui.add_space(4.0);
             if crate::widgets::link(ui, "Release page", FontId::proportional(13.0), t.accent).clicked() {
-                self.actions.push(Action::Update(super::UpdateAction::Open(v)));
+                self.actions.push(Action::Update(super::UpdateAction::Open(v.clone())));
             }
         });
     }

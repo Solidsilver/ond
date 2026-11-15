@@ -24,6 +24,8 @@ use std::sync::mpsc::Sender;
 /// matches its own group whole, so a message added to a group can't be left
 /// unhandled.
 pub enum Msg {
+    /// App releases are independent of the signed-in book account.
+    Update(crate::updates::UpdateMsg),
     Account(AccountMsg),
     Offline {
         session: u64,
@@ -219,6 +221,27 @@ struct OpenIdSlot {
 }
 
 impl Bridge {
+    /// Starts the app-wide checker, independent of account sessions. The
+    /// callback keeps only the sender and repaint notifier alive.
+    pub fn start_updates(&self, on: Arc<std::sync::atomic::AtomicBool>, now: Arc<tokio::sync::Notify>) {
+        let tx = self.tx.clone();
+        let notify = self.notify.clone();
+        crate::updates::start(&self.rt, &crate::updates::REDE, crate::updates::VERSION, crate::updates::channel(), on, now, move |result| {
+            let _ = tx.send(Msg::Update(crate::updates::UpdateMsg::Checked(result)));
+            notify();
+        });
+    }
+
+    /// Fetches notes for this app's release, regardless of the active account.
+    pub fn update_notes(&self, v: crate::updates::Version) {
+        let tx = self.tx.clone();
+        let notify = self.notify.clone();
+        crate::updates::fetch_notes(&self.rt, &crate::updates::REDE, crate::updates::VERSION, v.clone(), move |notes| {
+            let _ = tx.send(Msg::Update(crate::updates::UpdateMsg::ReleaseNotes(v, notes)));
+            notify();
+        });
+    }
+
     pub fn new(rt: tokio::runtime::Handle, tx: Sender<Msg>, notify: Notify, keeper: Keeper, paths: Arc<Paths>) -> Self {
         Self {
             rt,
