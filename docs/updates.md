@@ -17,7 +17,7 @@ Only copies built by the release workflow look (`OND_DISTRIBUTION` / `REDE_DISTR
 ### Order of events
 
 1. **Fetch.** A newer version is found on the followed channel and isn't skipped. The app downloads this platform's file from the release, and that file's `.minisig`, into a staging folder in its cache directory. A half-finished download is never installed.
-2. **Verify.** The signature is checked against the public key built into the app ([Signing](#signing)). A file that fails is deleted and the failure is shown. The app never installs anything unsigned, and never falls back to installing without the check.
+2. **Verify.** The signature is checked against the public key built into the app ([Signing](#signing)). The authenticated trusted comment must contain exactly one tab-separated `file:` field equal to the expected asset name, including its app, version, platform and architecture. A wrong or missing name is rejected even when the bytes have a valid signature. A file that fails is deleted and the failure is shown. The app never installs anything unsigned, and never falls back to installing without the check.
 3. **Ready.** Settings › About and the update notice say the update is ready, with Restart to Update.
 4. **Install.** On quit, or on Restart to Update, the platform's installer runs. Nothing is replaced while the app is playing. Restart to Update stops playback first, the same way quitting does. A plain quit installs and stays closed; Restart to Update installs and reopens. Rollback follows the same choice.
 5. **Fall back.** If the app can't install itself where it lives (no write permission, run from a disk image, an unknown layout), it says so and behaves as `notify`. The staged file is removed.
@@ -67,6 +67,7 @@ non-decimal values are ignored; repeated flags cannot extend the wait.
 HTTPS proves a file came from GitHub, not that it came from us: anyone who could publish a release could otherwise run code on every machine set to `install`. So every release file is signed with [minisign](https://jedisct1.github.io/minisign/) (Ed25519):
 
 - The secret key lives in two repository secrets, `UPDATE_SIGNING_KEY` and `UPDATE_SIGNING_PASSWORD`. The publish job signs each file in `dist/` and uploads the `.minisig` files beside them. Without the secret it publishes unsigned, and the apps then won't install that release (they still notify).
+- CI keeps minisign's default trusted comment, including `file:<asset-name>`. After authenticating the comment and bytes, the verifier requires that exact filename, preventing an older signed release from being served under a newer version's name.
 - The public key is a constant in `shell::updates`, shared by both apps. The apps verify with [`minisign-verify`](https://docs.rs/minisign-verify).
 - To make the key: `minisign -G -p update.pub -s update.key`. Put the contents of `update.key` and its password into the two secrets, and the public key's second line into the constant. Keep `update.key` somewhere safe and offline. To change keys, ship one release signed with the old key that carries the new public key. If the key is lost or leaks, users must install the next version by hand.
 

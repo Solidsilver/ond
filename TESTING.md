@@ -171,7 +171,9 @@ not claims that signed production updates have been installed successfully:
   leave its database untouched. Invalid `--after-update` arguments must not wait.
 - [ ] Interrupt downloads and relaunch; skip or change channel/mode during a
   download and after Ready. No partial, skipped or superseded update installs.
-  Try missing, corrupt and wrong-file signatures. Progress stops repainting
+  Try missing, corrupt and wrong-file signatures, including a genuinely signed
+  older archive served under the new asset name and a signed comment missing
+  its `file:` field. Progress stops repainting
   when I/O stops; paused/ready/failed/fallback states settle to idle.
 
 Automated tests use a committed throwaway public key and signature (the test

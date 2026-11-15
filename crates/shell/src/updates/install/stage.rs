@@ -127,7 +127,7 @@ fn clean_neighbor(stage: &Path) -> std::io::Result<()> {
 /// Streaming verification bounds memory even for a universal macOS archive.
 /// Modern minisign produces prehashed signatures; legacy unhashed ones are
 /// rejected rather than loading an unbounded file into memory.
-pub fn verify(file: &Path, signature: &str, key: &str) -> Result<(), Error> {
+pub fn verify(file: &Path, signature: &str, key: &str, expected_name: &str) -> Result<(), Error> {
     let key = PublicKey::from_base64(key).map_err(|_| Error::Signature)?;
     let signature = Signature::decode(signature).map_err(|_| Error::Signature)?;
     let mut verifier = key.verify_stream(&signature).map_err(|_| Error::Signature)?;
@@ -140,7 +140,14 @@ pub fn verify(file: &Path, signature: &str, key: &str) -> Result<(), Error> {
         }
         verifier.update(&buffer[..n]);
     }
-    verifier.finalize().map_err(|_| Error::Signature)
+    verifier.finalize().map_err(|_| Error::Signature)?;
+    // Read the filename only after finalize authenticates the trusted comment.
+    // Reject ambiguity as well as a signed archive replayed under a new name.
+    let mut names = signature.trusted_comment().split('\t').filter_map(|field| field.strip_prefix("file:"));
+    if names.next() != Some(expected_name) || names.next().is_some() {
+        return Err(Error::Signature);
+    }
+    Ok(())
 }
 
 pub(super) async fn fetch(
@@ -168,8 +175,9 @@ pub(super) async fn fetch(
     download(client, signature_url, &signature_path, 16 * 1024, |_, _| {}).await?;
     let signature = tokio::fs::read_to_string(&signature_path).await?;
     let key = key.to_owned();
+    let expected_name = name.to_owned();
     tokio::task::spawn_blocking(move || {
-        verify(&partial, &signature, &key)?;
+        verify(&partial, &signature, &key, &expected_name)?;
         fs::rename(partial, &stage.archive)?;
         fs::rename(signature_path, stage.path().join("archive.minisig"))?;
         Ok(stage)

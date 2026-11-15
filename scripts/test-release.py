@@ -116,6 +116,7 @@ class ReleaseTests(unittest.TestCase):
             UPDATE_SIGNING_KEY="encrypted fixture key", UPDATE_SIGNING_PASSWORD="fixture password",
         )
         self.assertEqual(len(list(dist.glob("*.minisig"))), 4)
+        self.assertFalse(any("-t" in call for call in self.calls() if call[0] == "minisign"))
         inputs = [call for call in self.calls() if call[0] == "sign-input"]
         self.assertEqual(len(inputs), 4)
         for _, key, password, path in inputs:

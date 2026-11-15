@@ -3,6 +3,7 @@ use crate::updates::{OND, REDE, UpdateCheck, Updates};
 use std::fs;
 use testkit::{RangeServer, Serve, wait_until};
 
+const ASSET: &str = "Ond-1.2.3-beta.4-macos-universal.zip";
 const BODY: &[u8] = include_bytes!("../../../testdata/updates/archive");
 const SIGNATURE: &str = include_str!("../../../testdata/updates/archive.minisig");
 const KEY_FILE: &str = include_str!("../../../testdata/updates/test.pub");
@@ -20,14 +21,14 @@ fn only_the_signed_file_is_accepted() {
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("archive");
     fs::write(&file, BODY).unwrap();
-    verify(&file, SIGNATURE, key()).unwrap();
-    assert!(matches!(verify(&file, SIGNATURE, PUBLIC_KEY), Err(Error::Signature)));
+    verify(&file, SIGNATURE, key(), ASSET).unwrap();
+    assert!(matches!(verify(&file, SIGNATURE, PUBLIC_KEY, ASSET), Err(Error::Signature)));
     fs::write(&file, b"a different release, signed by the same key").unwrap();
-    assert!(matches!(verify(&file, SIGNATURE, key()), Err(Error::Signature)));
+    assert!(matches!(verify(&file, SIGNATURE, key(), ASSET), Err(Error::Signature)));
     fs::write(&file, BODY).unwrap();
     let bad = SIGNATURE.replace("trusted comment:", "broken comment:");
-    assert!(verify(&file, &bad, key()).is_err());
-    assert!(verify(&file, "unsigned", key()).is_err());
+    assert!(verify(&file, &bad, key(), ASSET).is_err());
+    assert!(verify(&file, "unsigned", key(), ASSET).is_err());
     // Decode the production key too: the test fixture never replaces it.
     minisign_verify::PublicKey::from_base64(PUBLIC_KEY).unwrap();
 }
@@ -85,7 +86,7 @@ fn the_planner_selects_bundles_layouts_and_loose_binaries_or_a_typed_fallback() 
 }
 
 async fn fetch(root: &Path, server: &RangeServer, signature: &RangeServer) -> Result<stage::Stage, Error> {
-    stage::fetch(&reqwest::Client::new(), root, "update.zip", &server.url(), &signature.url(), key(), |_, _| {}).await
+    stage::fetch(&reqwest::Client::new(), root, ASSET, &server.url(), &signature.url(), key(), |_, _| {}).await
 }
 
 #[tokio::test]
@@ -121,10 +122,10 @@ async fn a_partial_download_never_becomes_installable_and_is_deleted_on_cancella
     let root = dir.path().to_owned();
     let url = server.url();
     let signature_url = sig.url();
-    let job = tokio::spawn(async move { stage::fetch(&reqwest::Client::new(), &root, "update.zip", &url, &signature_url, key(), |_, _| {}).await });
+    let job = tokio::spawn(async move { stage::fetch(&reqwest::Client::new(), &root, ASSET, &url, &signature_url, key(), |_, _| {}).await });
     wait_until("a partial download", || fs::read_dir(dir.path()).unwrap().filter_map(Result::ok).any(|e| e.path().join("download.part").is_file()));
     let stage = fs::read_dir(dir.path()).unwrap().filter_map(Result::ok).find(|e| e.file_type().unwrap().is_dir()).unwrap().path();
-    assert!(!stage.join("update.zip").exists());
+    assert!(!stage.join(ASSET).exists());
     job.abort();
     let _ = job.await;
     wait_until("the cancelled stage to be deleted", || !stage.exists());
@@ -433,4 +434,37 @@ fn only_one_plain_predecessor_pid_can_request_a_startup_wait() {
     assert_eq!(parse(&["--after-update"]), None);
     assert_eq!(parse(&["--after-update=42"]), None);
     assert_eq!(parse(&[]), None);
+}
+
+#[test]
+fn authentic_signatures_require_exactly_one_matching_release_filename() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("download.part");
+    fs::write(&file, BODY).unwrap();
+    for text in [
+        include_str!("../../../testdata/updates/archive.wrong-name.minisig"),
+        include_str!("../../../testdata/updates/archive.missing-name.minisig"),
+        include_str!("../../../testdata/updates/archive.duplicate-name.minisig"),
+    ] {
+        let signature = minisign_verify::Signature::decode(text).unwrap();
+        // These signatures authenticate the bytes and comment. The filename
+        // binding, rather than a cryptographic failure, must reject them.
+        minisign_verify::PublicKey::from_base64(key()).unwrap().verify(BODY, &signature, false).unwrap();
+        assert!(matches!(verify(&file, text, key(), ASSET), Err(Error::Signature)));
+    }
+    verify(&file, SIGNATURE, key(), ASSET).unwrap();
+    for wrong in ["Ond-1.2.3-beta.5-macos-universal.zip", "ond-1.2.3-beta.4-macos-universal.zip", "Ond-1.2.3-beta.4-linux-x86_64.tar.gz", ""] {
+        assert!(matches!(verify(&file, SIGNATURE, key(), wrong), Err(Error::Signature)));
+    }
+}
+
+#[tokio::test]
+async fn a_signed_archive_from_another_release_is_deleted_before_staging_completes() {
+    let dir = tempfile::tempdir().unwrap();
+    let body = RangeServer::start(BODY, Serve::fast());
+    for text in [include_str!("../../../testdata/updates/archive.wrong-name.minisig"), include_str!("../../../testdata/updates/archive.missing-name.minisig")] {
+        let signature = RangeServer::start(text.as_bytes(), Serve::fast());
+        assert!(matches!(fetch(dir.path(), &body, &signature).await, Err(Error::Signature)));
+        assert!(!fs::read_dir(dir.path()).unwrap().filter_map(Result::ok).any(|e| e.file_type().unwrap().is_dir()));
+    }
 }
