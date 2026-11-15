@@ -4,6 +4,9 @@
 //! own build version and distribution; account sessions do not scope these
 //! repository-wide results.
 
+pub mod install;
+pub use install::PUBLIC_KEY;
+
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::sync::Arc;
@@ -24,17 +27,19 @@ pub struct Releases {
     pub tags: &'static [&'static str],
     /// The folder under `.github/release-notes/` that has the app's notes.
     pub notes: &'static str,
+    /// Whether this app publishes Windows archives.
+    pub windows: bool,
 }
 
 /// Ond's: `ond-v0.5.0` from 0.5 on, and the `v0.4.4` tags from before Rede.
 /// Rede's tags (`rede-v`) start with neither.
-pub const OND: Releases = Releases { app: "Ond", tags: &["ond-v", "v"], notes: "ond" };
+pub const OND: Releases = Releases { app: "Ond", tags: &["ond-v", "v"], notes: "ond", windows: true };
 
 /// Rede's releases and hand-written notes.
-pub const REDE: Releases = Releases { app: "Rede", tags: &["rede-v"], notes: "rede" };
+pub const REDE: Releases = Releases { app: "Rede", tags: &["rede-v"], notes: "rede", windows: false };
 
 /// Whether an app looks for newer versions (GitHub distributions only).
-/// Room for installing them itself later.
+/// Installation is staged in the background and applied only after playback stops.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum UpdateCheck {
@@ -42,6 +47,8 @@ pub enum UpdateCheck {
     /// Says when one is out, with a link to it.
     #[default]
     Notify,
+    /// Fetches a verified update and installs it on quit.
+    Install,
 }
 
 /// Which versions the user wants to hear about. Betas includes full releases.
@@ -203,6 +210,11 @@ pub struct Updates {
     pub error: Option<String>,
     /// The requested version and its notes; the inner `None` means loading.
     pub notes: Option<(Version, Option<Notes>)>,
+    /// Installation state for About and the update notice; no polling is needed.
+    pub install: install::State,
+    pub install_error: Option<install::Error>,
+    /// Background job ownership; use `stage_update` and `cancel_install`.
+    pub installation: install::Installation,
 }
 
 impl Updates {
@@ -399,6 +411,77 @@ fn plain(s: &str) -> String {
     }
     out.push_str(rest);
     out.replace("**", "").replace('`', "")
+}
+
+impl Updates {
+    /// Reconciles installation with the app's eligible notice. Changing the
+    /// setting/channel or skipping aborts work and releases its disposable stage.
+    pub fn stage_update(
+        &mut self,
+        eligible: Option<&Version>,
+        check: UpdateCheck,
+        rt: &tokio::runtime::Handle,
+        app: &'static Releases,
+        cache: std::path::PathBuf,
+        send: impl Fn(install::Event) + Send + Sync + 'static,
+    ) {
+        let wanted = eligible.filter(|_| check == UpdateCheck::Install);
+        if self.install.version() == wanted {
+            return;
+        }
+        self.cancel_install();
+        if let Some(version) = wanted {
+            self.install_error = None;
+            self.install = install::State::Downloading { version: version.clone(), received: 0, total: None };
+            self.installation.job = Some(install::start(rt, app, version.clone(), cache, self.installation.generation, send));
+        }
+    }
+
+    pub fn cancel_install(&mut self) {
+        self.installation.generation = self.installation.generation.wrapping_add(1);
+        if let Some(job) = self.installation.job.take() {
+            drop(job);
+        }
+        self.install = install::State::Idle;
+    }
+
+    /// Discards late results by generation; dropping an obsolete Prepared
+    /// value also deletes its stage.
+    pub fn install_event(&mut self, event: install::Event) {
+        if event.generation != self.installation.generation {
+            return;
+        }
+        let Some(version) = self.install.version().cloned() else { return };
+        match event.kind {
+            install::EventKind::Progress { received, total } => {
+                if matches!(self.install, install::State::Downloading { .. }) {
+                    self.install = install::State::Downloading { version, received, total };
+                }
+            }
+            install::EventKind::Finished(result) => {
+                self.installation.job = None;
+                self.install = match result {
+                    Ok(prepared) => install::State::Ready { version, prepared },
+                    Err(error) => install::State::Failed { version, error },
+                };
+            }
+            install::EventKind::NotifyOnly(reason) => {
+                self.installation.job = None;
+                self.install = install::State::NotifyOnly { version, reason };
+            }
+        }
+    }
+
+    /// Playback must already have stopped through the app's normal quit path.
+    pub fn install_on_quit(&mut self) -> Result<(), install::Error> {
+        if self.install.ready()
+            && let install::State::Ready { prepared, .. } = std::mem::take(&mut self.install)
+        {
+            prepared.install()?;
+        }
+        self.cancel_install();
+        Ok(())
+    }
 }
 
 #[cfg(test)]

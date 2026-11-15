@@ -851,7 +851,8 @@ mod tests {
             assert_eq!(read.skipped_update.as_deref(), Some("0.1.0-beta.2"));
         }
         let future = super::Settings::from_json(br#"{"updates":"install","update_channel":"betas"}"#).unwrap();
-        assert_eq!(future.updates, UpdateCheck::Notify);
+        assert_eq!(future.updates, UpdateCheck::Install);
+        assert_eq!(super::Settings::from_json(br#"{"updates":"unknown"}"#).unwrap().updates, UpdateCheck::Notify);
         assert_eq!(future.update_channel, Some(UpdateChannel::Betas));
         assert_eq!(super::Settings::from_json(b"{}").unwrap().update_channel, None);
     }
