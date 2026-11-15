@@ -218,10 +218,9 @@ fn is_final(e: &sources::Error) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use accounts::AccountId;
     use async_trait::async_trait;
-    use sources::{
-        AccountId, Changes, DeviceInfo, Error, Item, LibraryId, PlaySession, Position, Progress, ProgressUpdate, Result as SourceResult, Stamp, TrackFile,
-    };
+    use sources::{Changes, DeviceInfo, Error, Item, LibraryId, PlaySession, Position, Progress, ProgressUpdate, Result as SourceResult, Stamp, TrackFile};
     use std::collections::HashMap;
     use std::sync::Mutex;
 
@@ -500,8 +499,8 @@ mod tests {
         item.description = Some("A book.".into());
         item.tracks = vec![TrackFile { index: 1, start_offset: 0.0, duration: Some(60.0), suffix: Some("m4b".into()), ..TrackFile::default() }];
         item.chapters = vec![sources::Chapter { start: 0.0, end: 60.0, title: "One".into() }];
-        shelf.set_details(&sources::ItemKey::new(account(), "b"), &item).unwrap();
-        let back = shelf.item(&sources::ItemKey::new(account(), "b")).unwrap().unwrap();
+        shelf.set_details(&accounts::ItemKey::new(account(), "b"), &item).unwrap();
+        let back = shelf.item(&accounts::ItemKey::new(account(), "b")).unwrap().unwrap();
         assert_eq!(back.tracks, item.tracks);
         assert_eq!(back.chapters, item.chapters);
         assert_eq!(back.description.as_deref(), Some("A book."));

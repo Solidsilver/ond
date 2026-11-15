@@ -166,9 +166,9 @@ impl ViewCtx<'_> {
         }
 
         // Background work.
-        if let Some(p) = self.sync.progress {
+        if let Some(p) = self.session.sync.progress {
             out.push(Segment { text: format!("sync {}/{}", p.done, p.total), detail: p.label(), tone: Tone::Normal });
-        } else if self.sync.albums {
+        } else if self.session.sync.albums {
             out.push(Segment { text: "sync albums…".into(), detail: "Fetching the album list".into(), tone: Tone::Normal });
         }
         let a = self.analysis.runner.progress();
@@ -189,7 +189,7 @@ impl ViewCtx<'_> {
 
         // Server.
         if let Some(s) = &self.session.settings {
-            let host = server_host(&s.server);
+            let host = server_host(s.server());
             let (text, tone) = if !self.session.online {
                 (format!("{host} · offline"), Tone::Warn)
             } else {
@@ -198,7 +198,7 @@ impl ViewCtx<'_> {
                     None => (host.clone(), Tone::Normal),
                 }
             };
-            let detail = format!("{}\n{}", s.server, if self.session.server_info.is_empty() { "Not connected" } else { &self.session.server_info });
+            let detail = format!("{}\n{}", s.server(), if self.session.server_info.is_empty() { "Not connected" } else { &self.session.server_info });
             out.push(Segment { text, detail, tone });
         }
 

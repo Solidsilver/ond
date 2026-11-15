@@ -21,6 +21,12 @@ const YEAR_W: f32 = 64.0;
 const SONGS_W: f32 = 64.0;
 const LENGTH_W: f32 = 80.0;
 const ADDED_W: f32 = 112.0;
+/// The Source column, while the list mixes sources: room for a dot and a
+/// short name, which is cut to fit.
+pub(super) const SOURCE_W: f32 = 112.0;
+/// What the shared columns (title, artist, genre) keep before the Source
+/// column gives way to them.
+const SOURCE_MIN_FLEX: f32 = 320.0;
 /// Rows past either end whose covers load ahead.
 const PREFETCH_ROWS: usize = 8;
 
@@ -35,10 +41,10 @@ impl ViewCtx<'_> {
         }
         let marks = self.grid_marks(route);
         let head = super::table::head_rect(ui, marks.is_some());
-        let c = columns(head);
+        let c = columns(head, self.mixed_sources());
         // Only Albums sorts; the other pages keep their order.
         let sorts = |by: AlbumSort| (*route == Route::Albums).then_some(by);
-        let heads = [
+        let mut heads = vec![
             Head { label: "Title", rect: c.title, right: false, sorts: sorts(AlbumSort::Title) },
             Head { label: "Artist", rect: c.artist, right: false, sorts: sorts(AlbumSort::Artist) },
             Head { label: "Year", rect: c.year, right: false, sorts: sorts(AlbumSort::Year) },
@@ -47,8 +53,12 @@ impl ViewCtx<'_> {
             Head { label: "Length", rect: c.length, right: true, sorts: None },
             Head { label: "Added", rect: c.added, right: false, sorts: sorts(AlbumSort::Added) },
         ];
+        if let Some(source) = c.source {
+            heads.insert(2, Head { label: "Source", rect: source, right: false, sorts: None });
+        }
         super::table::header(ui, head, "albums-col", &heads, &mut self.ui.sort, &mut self.ui.sort_desc);
 
+        let sources = self.mixed_sources();
         VirtualList::table(("albums-list", route), marks.as_deref(), ROW_H, ids.len()).show(ui, |ui, range| {
             // The covers just past either end, so scrolling finds them loaded.
             for row in near(&range, PREFETCH_ROWS, ids.len()) {
@@ -57,14 +67,14 @@ impl ViewCtx<'_> {
                 }
             }
             for &i in &ids[range] {
-                self.album_row(ui, &t, i);
+                self.album_row(ui, &t, i, sources);
             }
         });
     }
 
     /// One album's row. Click opens it, right-click has the rest (Play
     /// among them) (as its tile does).
-    fn album_row(&mut self, ui: &mut Ui, t: &Tokens, idx: usize) {
+    fn album_row(&mut self, ui: &mut Ui, t: &Tokens, idx: usize, sources: bool) {
         let row = TrackRow::new(ui, ROW_H, Sense::click());
         // Borrowed from the library, not from `self`, so drawing can take `&mut self`.
         let data = self.data;
@@ -72,7 +82,7 @@ impl ViewCtx<'_> {
         let pin = self.album_pin(&album.id);
         if ui.is_rect_visible(row.rect) {
             row.fill(ui, t, false, row.pointer_on());
-            let c = columns(row.rect);
+            let c = columns(row.rect, sources);
             let art = Rect::from_center_size(pos2(c.title.left() + col::INSET + ART / 2.0, row.cy()), vec2(ART, ART));
             self.art.paint_as(ui, art, album.cover_art.as_deref(), col::ART_RADIUS, &crate::art::album_cover(album));
             let x = art.right() + 10.0;
@@ -87,6 +97,17 @@ impl ViewCtx<'_> {
                 row.line(ui, r.left() + col::INSET, r.width() - 2.0 * col::INSET, text, FontId::proportional(13.0), t.muted);
             };
             cell(ui, c.artist, album.artist.as_deref().unwrap_or(""));
+            if let Some(r) = c.source {
+                let at = (r.left() + col::INSET, row.cy(), r.width() - 2.0 * col::INSET);
+                super::source_look::source_cell(
+                    ui,
+                    at,
+                    &self.album_sources(&album.id),
+                    TrackRow::ground(t, false, row.pointer_on()),
+                    FontId::proportional(13.0),
+                    t.muted,
+                );
+            }
             cell(ui, c.year, &album.year.map(|y| y.to_string()).unwrap_or_default());
             cell(ui, c.genre, &album.all_genres().join(", "));
             row.right_text(ui, c.songs.right() - col::INSET, album.song_count.to_string(), FontId::proportional(12.0), t.muted);
@@ -107,6 +128,8 @@ impl ViewCtx<'_> {
 struct Columns {
     title: Rect,
     artist: Rect,
+    /// While the list mixes sources and there's room for it.
+    source: Option<Rect>,
     year: Rect,
     genre: Rect,
     songs: Rect,
@@ -114,11 +137,31 @@ struct Columns {
     added: Rect,
 }
 
-/// Title, artist and genre share what's left after the fixed columns.
-fn columns(row: Rect) -> Columns {
+/// Title, artist and genre share what's left after the fixed columns. The
+/// Source column (`sources`) comes after the artist, and is the first to
+/// go when the shared columns would be left too little.
+fn columns(row: Rect, sources: bool) -> Columns {
+    let fixed = YEAR_W + SONGS_W + LENGTH_W + ADDED_W;
+    if sources && row.width() - fixed - SOURCE_W >= SOURCE_MIN_FLEX {
+        let [title, artist, source, year, genre, songs, length, added] = super::table::columns(
+            row,
+            [
+                // The title keeps more of what's shared, which is less.
+                Width::Share(0.46),
+                Width::Share(0.3),
+                Width::Fixed(SOURCE_W),
+                Width::Fixed(YEAR_W),
+                Width::Share(0.24),
+                Width::Fixed(SONGS_W),
+                Width::Fixed(LENGTH_W),
+                Width::Fixed(ADDED_W),
+            ],
+        );
+        return Columns { title, artist, source: Some(source), year, genre, songs, length, added };
+    }
     let [title, artist, year, genre, songs, length, added] = super::table::columns(
         row,
         [Width::Share(0.4), Width::Share(0.32), Width::Fixed(YEAR_W), Width::Share(0.28), Width::Fixed(SONGS_W), Width::Fixed(LENGTH_W), Width::Fixed(ADDED_W)],
     );
-    Columns { title, artist, year, genre, songs, length, added }
+    Columns { title, artist, source: None, year, genre, songs, length, added }
 }

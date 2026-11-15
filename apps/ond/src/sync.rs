@@ -14,13 +14,12 @@
 //! per album), so a sync cut short by quitting picks up where it stopped.
 
 use crate::failure::Failure;
-use library::{Album, Library};
+use async_trait::async_trait;
+use library::{Album, AlbumTracks, Artist, Library, Track};
 use std::collections::HashMap;
 use std::collections::HashSet;
-use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use subsonic::{AlbumListType, AlbumWithSongs, Client, Song};
 use tokio::task::JoinSet;
 
 pub const BULK_PAGE: u32 = 500;
@@ -47,31 +46,57 @@ fn retry_delay(failures: usize) -> std::time::Duration {
 const BULK_DONE: &str = "tracks_bulk_done";
 const BULK_OFFSET: &str = "tracks_bulk_offset";
 
-/// Where the tracks come from; [`Client`] in the app, a fake in tests.
-pub trait Fetch: Clone + Send + Sync + 'static {
-    /// One page of the album list, alphabetical by artist.
-    fn album_page(&self, size: u32, offset: u32) -> impl Future<Output = Result<Vec<subsonic::Album>, Failure>> + Send;
-    fn artists(&self) -> impl Future<Output = Result<Vec<subsonic::Artist>, Failure>> + Send;
-    fn album(&self, id: String) -> impl Future<Output = Result<AlbumWithSongs, Failure>> + Send;
-    /// One page of every song in the library.
-    fn all_songs(&self, query: &'static str, count: u32, offset: u32) -> impl Future<Output = Result<Vec<Song>, Failure>> + Send;
+/// A bulk page's rows and how far the source advanced. Some server entries
+/// cannot become library rows; dropping them must not change offsets or make
+/// a full page look like the last one.
+pub struct SongPage {
+    pub tracks: Vec<Track>,
+    pub scanned: u32,
 }
 
-impl Fetch for Client {
-    async fn album_page(&self, size: u32, offset: u32) -> Result<Vec<subsonic::Album>, Failure> {
-        self.album_list(AlbumListType::AlphabeticalByArtist, size, offset).await.map_err(Failure::from)
+impl From<Vec<Track>> for SongPage {
+    fn from(tracks: Vec<Track>) -> Self {
+        Self { scanned: tracks.len() as u32, tracks }
     }
+}
 
-    async fn artists(&self) -> Result<Vec<subsonic::Artist>, Failure> {
-        Client::artists(self).await.map_err(Failure::from)
+/// Paged library rows, supplied by a server source or a test fake.
+#[async_trait]
+pub trait Fetch: Send + Sync + 'static {
+    /// Optional identity metadata, separate from frozen library rows.
+    fn artist_mbids(&self) -> Vec<(String, String)> {
+        Vec::new()
     }
-
-    async fn album(&self, id: String) -> Result<AlbumWithSongs, Failure> {
-        Client::album(self, &id).await.map_err(Failure::from)
+    fn copy_mbids(&self) -> crate::source::mbids::CopyMbids {
+        Default::default()
     }
+    /// One page of the album list, alphabetical by artist.
+    async fn album_page(&self, size: u32, offset: u32) -> Result<Vec<Album>, Failure>;
+    async fn artists(&self) -> Result<Vec<Artist>, Failure>;
+    async fn album(&self, id: String) -> Result<AlbumTracks, Failure>;
+    /// One page of every song in the library.
+    async fn all_songs(&self, query: &'static str, count: u32, offset: u32) -> Result<SongPage, Failure>;
+}
 
-    async fn all_songs(&self, query: &'static str, count: u32, offset: u32) -> Result<Vec<Song>, Failure> {
-        self.search_songs(query, count, offset).await.map_err(Failure::from)
+#[async_trait]
+impl<T: Fetch + ?Sized> Fetch for Arc<T> {
+    fn artist_mbids(&self) -> Vec<(String, String)> {
+        (**self).artist_mbids()
+    }
+    fn copy_mbids(&self) -> crate::source::mbids::CopyMbids {
+        (**self).copy_mbids()
+    }
+    async fn album_page(&self, size: u32, offset: u32) -> Result<Vec<Album>, Failure> {
+        (**self).album_page(size, offset).await
+    }
+    async fn artists(&self) -> Result<Vec<Artist>, Failure> {
+        (**self).artists().await
+    }
+    async fn album(&self, id: String) -> Result<AlbumTracks, Failure> {
+        (**self).album(id).await
+    }
+    async fn all_songs(&self, query: &'static str, count: u32, offset: u32) -> Result<SongPage, Failure> {
+        (**self).all_songs(query, count, offset).await
     }
 }
 
@@ -209,14 +234,14 @@ pub async fn artists<F: Fetch>(lib: &Arc<Library>, fetch: &F, live: &impl Fn() -
 /// Runs a full sync pass. `progress` is called after every page or album.
 /// Nothing is stored once `live` turns false (see [`write()`]); a cancelled
 /// pass still stores what's already on its way.
-pub async fn run<F: Fetch>(lib: Arc<Library>, fetch: F, cancel: Arc<AtomicBool>, live: impl Fn() -> bool, progress: impl Fn(Progress)) -> Outcome {
+pub async fn run<F: Fetch + Clone>(lib: Arc<Library>, fetch: F, cancel: Arc<AtomicBool>, live: impl Fn() -> bool, progress: impl Fn(Progress)) -> Outcome {
     match run_inner(&lib, fetch, &cancel, &live, &progress).await {
         Ok(o) => o,
         Err(e) => Outcome::Failed(e),
     }
 }
 
-async fn run_inner<F: Fetch>(
+async fn run_inner<F: Fetch + Clone>(
     lib: &Arc<Library>,
     fetch: F,
     cancel: &AtomicBool,
@@ -298,17 +323,17 @@ async fn bulk_pass<F: Fetch>(
                 continue;
             }
         };
-        if page.is_empty() && offset == 0 && total > 0 {
+        if page.scanned == 0 && offset == 0 && total > 0 {
             if query.is_empty() {
                 query = "\"\"";
                 continue;
             }
             return Ok(BulkEnd::Unsupported);
         }
-        let n = page.len() as u32;
+        let n = page.scanned;
         let next = offset + n;
         write(lib, live, move |l| {
-            l.store_songs(page)?;
+            l.store_tracks(page.tracks)?;
             l.set_meta(BULK_OFFSET, Some(next))
         })
         .await?;
@@ -323,7 +348,7 @@ async fn bulk_pass<F: Fetch>(
 /// Fetches `ids` with [`CONCURRENCY`] requests in flight, storing them in
 /// batches. `None` when cancelled; on cancel or on giving up after
 /// [`MAX_FAILURES`] failures in a row, what was fetched so far is kept.
-async fn per_album<F: Fetch>(
+async fn per_album<F: Fetch + Clone>(
     lib: &Arc<Library>,
     fetch: &F,
     cancel: &AtomicBool,
@@ -392,64 +417,33 @@ pub(crate) mod tests {
         assert_eq!(retry_delay(50), retry_delay(5), "capped");
     }
 
-    pub(crate) fn album(id: &str, songs: u32) -> subsonic::Album {
-        subsonic::Album {
+    pub(crate) fn album(id: &str, songs: u32) -> Album {
+        Album {
             id: id.into(),
             name: format!("Album {id}"),
             artist: Some("Artist".into()),
-            artist_id: None,
+            artist_ref: None,
             cover_art: Some(format!("al-{id}_1")),
             song_count: songs,
-            duration: 100 * songs,
+            duration_secs: 100 * songs,
             year: Some(2000),
             genre: None,
             created: None,
-            starred: None,
-            play_count: None,
-            user_rating: None,
-            sort_name: None,
-            record_labels: Vec::new(),
+            sort: None,
+            labels: Vec::new(),
             genres: Vec::new(),
             artists: Vec::new(),
         }
     }
 
-    pub(crate) fn song(id: String, album_id: &str, n: u32) -> Song {
-        Song {
-            id,
-            title: format!("t{n}"),
-            album: None,
-            album_id: Some(album_id.into()),
-            artist: None,
-            artist_id: None,
-            track: Some(n),
-            disc_number: Some(1),
-            year: None,
-            genre: None,
-            cover_art: None,
-            size: None,
-            content_type: None,
-            suffix: None,
-            duration: Some(100),
-            bit_rate: None,
-            bit_depth: None,
-            sampling_rate: None,
-            channel_count: None,
-            replay_gain: None,
-            display_composer: None,
-            contributors: Vec::new(),
-            artists: Vec::new(),
-            starred: None,
-            user_rating: None,
-            play_count: None,
-            played: None,
-        }
+    pub(crate) fn song(id: String, album_id: &str, n: u32) -> Track {
+        Track { track: Some(n), disc: Some(1), duration_secs: Some(100), ..crate::test_tracks::track(&id, album_id, &format!("t{n}")) }
     }
 
     /// A server with `albums`, each with `song_count` songs. Records calls.
     #[derive(Clone)]
     struct Fake {
-        albums: Arc<Mutex<Vec<subsonic::Album>>>,
+        albums: Arc<Mutex<Vec<Album>>>,
         bulk: bool,
         /// search3 skips songs of this album (as if added mid-pass).
         bulk_skips: Option<String>,
@@ -470,7 +464,7 @@ pub(crate) mod tests {
     }
 
     impl Fake {
-        fn new(albums: Vec<subsonic::Album>, bulk: bool) -> Self {
+        fn new(albums: Vec<Album>, bulk: bool) -> Self {
             Self {
                 albums: Arc::new(Mutex::new(albums)),
                 bulk,
@@ -486,13 +480,14 @@ pub(crate) mod tests {
             }
         }
 
-        fn songs_of(a: &subsonic::Album) -> Vec<Song> {
+        fn songs_of(a: &Album) -> Vec<Track> {
             (1..=a.song_count).map(|n| song(format!("{}-{n}", a.id), &a.id, n)).collect()
         }
     }
 
+    #[async_trait]
     impl Fetch for Fake {
-        async fn album_page(&self, size: u32, offset: u32) -> Result<Vec<subsonic::Album>, Failure> {
+        async fn album_page(&self, size: u32, offset: u32) -> Result<Vec<Album>, Failure> {
             if self.list_fails_at.is_some_and(|at| offset >= at) {
                 return Err(Failure::Network("server went away".into()));
             }
@@ -501,20 +496,20 @@ pub(crate) mod tests {
             Ok(self.albums.lock().unwrap().iter().skip(offset as usize).take(size as usize).cloned().collect())
         }
 
-        async fn artists(&self) -> Result<Vec<subsonic::Artist>, Failure> {
-            Ok(vec![subsonic::Artist { id: "ar1".into(), name: "Bill Evans".into(), album_count: 3, cover_art: None, sort_name: None }])
+        async fn artists(&self) -> Result<Vec<Artist>, Failure> {
+            Ok(vec![Artist { id: "ar1".into(), name: "Bill Evans".into(), album_count: 3, cover_art: None, sort: None }])
         }
 
-        async fn album(&self, id: String) -> Result<AlbumWithSongs, Failure> {
+        async fn album(&self, id: String) -> Result<AlbumTracks, Failure> {
             self.album_calls.lock().unwrap().push(id.clone());
             if self.failing_albums.lock().unwrap().contains(&id) {
                 return Err(Failure::Network("server went away".into()));
             }
             let a = self.albums.lock().unwrap().iter().find(|a| a.id == id).cloned().ok_or(Failure::Server("not found".into()))?;
-            Ok(AlbumWithSongs { song: Fake::songs_of(&a), album: a })
+            Ok(AlbumTracks { tracks: Fake::songs_of(&a), album: a })
         }
 
-        async fn all_songs(&self, _query: &'static str, count: u32, offset: u32) -> Result<Vec<Song>, Failure> {
+        async fn all_songs(&self, _query: &'static str, count: u32, offset: u32) -> Result<SongPage, Failure> {
             let pages = self.page_calls.fetch_add(1, Ordering::SeqCst) + 1;
             if let Some((after, cancel)) = &self.cancel_after_pages
                 && pages > *after
@@ -525,16 +520,16 @@ pub(crate) mod tests {
                 return Err(Failure::Network("hiccup".into()));
             }
             if !self.bulk {
-                return Ok(Vec::new());
+                return Ok(Vec::new().into());
             }
-            let all: Vec<Song> = self.albums.lock().unwrap().iter().filter(|a| Some(&a.id) != self.bulk_skips.as_ref()).flat_map(Fake::songs_of).collect();
-            Ok(all.into_iter().skip(offset as usize).take(count as usize).collect())
+            let all: Vec<Track> = self.albums.lock().unwrap().iter().filter(|a| Some(&a.id) != self.bulk_skips.as_ref()).flat_map(Fake::songs_of).collect();
+            Ok(all.into_iter().skip(offset as usize).take(count as usize).collect::<Vec<_>>().into())
         }
     }
 
-    fn library(albums: &[subsonic::Album]) -> Arc<Library> {
+    fn library(albums: &[Album]) -> Arc<Library> {
         let lib = Library::in_memory().unwrap();
-        lib.upsert_albums(albums.to_vec()).unwrap();
+        lib.upsert_albums(albums.iter().cloned()).unwrap();
         Arc::new(lib)
     }
 
@@ -542,13 +537,13 @@ pub(crate) mod tests {
         tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap()
     }
 
-    fn many(n: usize, songs: u32) -> Vec<subsonic::Album> {
+    fn many(n: usize, songs: u32) -> Vec<Album> {
         (0..n).map(|i| album(&format!("a{i:03}"), songs)).collect()
     }
 
     #[test]
     fn plan_picks_bulk_for_a_fresh_big_library_and_resumes_it() {
-        let albums: Vec<Album> = many(300, 10).into_iter().map(Album::from).collect();
+        let albums = many(300, 10);
         let none = HashMap::new();
         assert_eq!(plan(&albums, &none, false, None), Plan::Bulk { from: 0 });
         assert_eq!(plan(&albums, &none, false, Some(1500)), Plan::Bulk { from: 1500 });
@@ -584,7 +579,7 @@ pub(crate) mod tests {
 
     #[test]
     fn bulk_stamps_only_complete_albums() {
-        let albums: Vec<Album> = vec![album("a", 2), album("b", 3), album("c", 0)].into_iter().map(Album::from).collect();
+        let albums = vec![album("a", 2), album("b", 3), album("c", 0)];
         let counts: HashMap<String, u32> = [("a".into(), 2), ("b".into(), 2)].into_iter().collect();
         let ids: Vec<String> = bulk_stamps(&albums, &counts).into_iter().map(|(id, _)| id).collect();
         assert_eq!(ids, ["a", "c"]);

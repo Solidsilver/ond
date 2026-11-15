@@ -4,6 +4,7 @@
 
 use crate::art::Lru;
 use crate::memo::Memo;
+use crate::source::TrackKey;
 use analysis::Peaks;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -17,7 +18,7 @@ const KEPT: usize = 32;
 /// How often to look again for a playing track's file while it downloads.
 const LOOK_EVERY: Duration = Duration::from_secs(1);
 
-type Done = (String, Option<Peaks>);
+type Done = (TrackKey, Option<Peaks>);
 
 /// How the waveform's bars look (Settings › Appearance): their ends, and
 /// how thick and how far apart, in half points (each rounds to whole pixels).
@@ -70,18 +71,18 @@ pub fn sample(n: usize) -> Vec<f32> {
 
 pub struct Waveforms {
     ctx: egui::Context,
-    peaks: HashMap<String, Arc<Peaks>>,
-    lru: Lru<String>,
+    peaks: HashMap<TrackKey, Arc<Peaks>>,
+    lru: Lru<TrackKey>,
     /// Being read now.
-    pending: HashSet<String>,
+    pending: HashSet<TrackKey>,
     /// Couldn't be read; not tried again this session.
-    failed: HashSet<String>,
+    failed: HashSet<TrackKey>,
     /// The track last looked for a file for, and when.
-    looked: Option<(String, Instant)>,
+    looked: Option<(TrackKey, Instant)>,
     tx: Sender<Done>,
     rx: Receiver<Done>,
     /// The last bars handed out, by track and count.
-    bars: Memo<(String, usize), Vec<f32>>,
+    bars: Memo<(TrackKey, usize), Vec<f32>>,
     /// How often to look again for a playing track's file ([`LOOK_EVERY`] in
     /// the app; tests choose their own so they aren't racing a second).
     look_every: Duration,
@@ -122,7 +123,7 @@ impl Waveforms {
     /// Whether a read for `id` finished with nothing, so it isn't asked for
     /// again this session (a test waits on this instead of looking inside).
     #[cfg(test)]
-    pub fn gave_up(&self, id: &str) -> bool {
+    pub fn gave_up(&self, id: &TrackKey) -> bool {
         self.failed.contains(id)
     }
 
@@ -139,7 +140,7 @@ impl Waveforms {
         }
     }
 
-    pub fn insert(&mut self, id: String, peaks: Peaks) {
+    pub fn insert(&mut self, id: TrackKey, peaks: Peaks) {
         for gone in self.lru.insert(id.clone(), 1) {
             self.peaks.remove(&gone);
         }
@@ -148,7 +149,7 @@ impl Waveforms {
 
     /// Makes sure track `id`'s peaks are on their way: once `file` finds a
     /// complete copy (asked at most once a second), it's read in the background.
-    pub fn want(&mut self, id: &str, suffix: Option<&str>, file: impl FnOnce() -> Option<PathBuf>) {
+    pub fn want(&mut self, id: &TrackKey, suffix: Option<&str>, file: impl FnOnce() -> Option<PathBuf>) {
         if self.peaks.contains_key(id) || self.pending.contains(id) || self.failed.contains(id) {
             return;
         }
@@ -176,7 +177,7 @@ impl Waveforms {
     }
 
     /// Track `id` as `n` bars (0..=1), if its peaks are ready.
-    pub fn bars(&mut self, id: &str, n: usize) -> Option<Arc<Vec<f32>>> {
+    pub fn bars(&mut self, id: &TrackKey, n: usize) -> Option<Arc<Vec<f32>>> {
         let peaks = self.peaks.get(id)?;
         self.lru.touch(&id.to_owned());
         Some(self.bars.get((id.to_owned(), n), || peaks.bars(n)))
@@ -227,24 +228,24 @@ mod tests {
         let path = dir.path().join("t.wav");
         let mut w = Waveforms::for_test(egui::Context::default());
         // Still downloading: nothing to read yet, and not asked again at once.
-        w.want("t", Some("wav"), || None);
+        w.want(&crate::test_tracks::key("t"), Some("wav"), || None);
         let mut asked = false;
-        w.want("t", Some("wav"), || {
+        w.want(&crate::test_tracks::key("t"), Some("wav"), || {
             asked = true;
             None
         });
         assert!(!asked, "looked again within the look interval");
-        assert!(w.bars("t", 10).is_none());
+        assert!(w.bars(&crate::test_tracks::key("t"), 10).is_none());
 
         std::thread::sleep(Duration::from_millis(250));
         std::fs::write(&path, wav()).unwrap();
-        w.want("t", Some("wav"), || Some(path.clone()));
+        w.want(&crate::test_tracks::key("t"), Some("wav"), || Some(path.clone()));
         // The read is off this thread, at normal priority: generous, and far
         // under the half minute a background-QoS reader could take.
         let deadline = testkit::Deadline::new();
         let bars = loop {
             w.poll();
-            if let Some(b) = w.bars("t", 10) {
+            if let Some(b) = w.bars(&crate::test_tracks::key("t"), 10) {
                 break b;
             }
             assert!(!deadline.passed(), "the waveform never arrived");
@@ -255,7 +256,18 @@ mod tests {
         assert!(bars[0] < 0.2 && bars[9] == 1.0, "{bars:?}");
         assert!(bars.windows(2).all(|p| p[1] >= p[0] - 0.05));
         // Asked for again: the same bars, not rebuilt.
-        assert!(Arc::ptr_eq(&bars, &w.bars("t", 10).unwrap()));
+        assert!(Arc::ptr_eq(&bars, &w.bars(&crate::test_tracks::key("t"), 10).unwrap()));
+    }
+
+    #[test]
+    fn waveforms_with_the_same_id_on_different_accounts_do_not_share_peaks() {
+        let mut w = Waveforms::for_test(egui::Context::default());
+        let one = crate::test_tracks::key("abc");
+        let two = TrackKey::new(accounts::AccountId::new(), "abc");
+        w.insert(one.clone(), Peaks { values: vec![255; 10] });
+        assert!(w.bars(&two, 10).is_none());
+        w.insert(two.clone(), Peaks { values: vec![0; 10] });
+        assert_ne!(*w.bars(&one, 10).unwrap(), *w.bars(&two, 10).unwrap());
     }
 
     #[test]
@@ -264,16 +276,16 @@ mod tests {
         let path = dir.path().join("bad.flac");
         std::fs::write(&path, b"not audio").unwrap();
         let mut w = Waveforms::for_test(egui::Context::default());
-        w.want("bad", Some("flac"), || Some(path.clone()));
+        w.want(&crate::test_tracks::key("bad"), Some("flac"), || Some(path.clone()));
         let deadline = testkit::Deadline::new();
-        while !w.gave_up("bad") {
+        while !w.gave_up(&crate::test_tracks::key("bad")) {
             w.poll();
             assert!(!deadline.passed(), "the waveform never gave up on the file");
             std::thread::sleep(Duration::from_millis(5));
         }
-        w.want("bad", Some("flac"), || panic!("tried again"));
+        w.want(&crate::test_tracks::key("bad"), Some("flac"), || panic!("tried again"));
         // Past the look interval too: the failure, not the throttle, is why.
         std::thread::sleep(Duration::from_millis(250));
-        w.want("bad", Some("flac"), || panic!("tried again later"));
+        w.want(&crate::test_tracks::key("bad"), Some("flac"), || panic!("tried again later"));
     }
 }

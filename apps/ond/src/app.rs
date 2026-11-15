@@ -9,6 +9,11 @@
 //! actions and messages each one handles are in their own modules:
 //!
 //! - `session`: the server connection, the login form, offline and back, signing out
+//! - `onboarding`: the first-run sheet the login form is drawn in
+//! - `sources`: a folder of music added from the sheet, a source's folders,
+//!   the folder picker, removing a source ([`SourceAction`])
+//! - `source_look`: each source's name, colour and state as the switcher,
+//!   chips, dots and Settings show them, and when dots are drawn
 //! - `data`: the library as loaded, the sync's state, the search index, queue
 //!   actions waiting for tracks
 //! - `pins`: offline downloads ([`OfflineAction`])
@@ -58,15 +63,19 @@
 //!    `widgets::empty_state` rather than drawing those again.
 
 // The app's parts.
+mod all_sources;
 mod analyzing;
 mod commands;
 mod data;
 mod frame;
-mod pins;
+mod mixed_playlists;
+mod onboarding;
+pub(crate) mod pins;
 mod playing;
 mod prefs_view;
 mod session;
 mod signal_card;
+mod sources;
 mod ui_state;
 mod updating;
 mod view_ctx;
@@ -95,6 +104,7 @@ mod seek;
 mod settings_page;
 mod sidebar;
 mod songs;
+mod source_look;
 mod table;
 mod toolbar;
 mod track_list;
@@ -127,7 +137,7 @@ use crate::settings::Paths;
 use crate::theme::{self, Tokens};
 use crate::window::WindowMode;
 use audio::{Command, EngineHandle, PlayState};
-use library::{Library, Track};
+use library::Track;
 use offline::Pin;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -144,7 +154,6 @@ use {
     crate::tracks::TrackSet,
     library::Album,
     offline::TrackRef,
-    pins::track_ref,
     ui_state::QueueUi,
 };
 
@@ -159,6 +168,7 @@ pub use pins::{Downloads, Keep, OfflineAction};
 pub use playing::OutputAction;
 pub use prefs_view::PrefsAction;
 pub use session::Session;
+pub use sources::{FolderTarget, SourceAction};
 pub use ui_state::{AlbumSort, ArtistSort, DragTracks, Focus, QueueTab, UiState};
 pub use window_state::WindowAction;
 
@@ -174,6 +184,10 @@ use window_state::{WindowState, title_bar_h};
 /// [`OutputAction`], [`OfflineAction`], [`AnalysisAction`], the queue's
 /// [`QueueEdit`]), and that part's module applies them.
 pub enum Action {
+    /// The sidebar switcher and All sources filter chips.
+    Scope(all_sources::ScopeAction),
+    /// A source's own controls, independent of the browsing scope.
+    ForSource(accounts::AccountId, Box<Action>),
     Go(Route),
     Back,
     Forward,
@@ -231,9 +245,13 @@ pub enum Action {
     CancelSignIn,
     /// Close the login form and keep browsing what's stored.
     CloseLogin,
+    /// Something done on the first-run sheet.
+    Onboarding(shell::kit::OnboardingEvent),
+    /// Folders added or changed, a source removed.
+    Sources(SourceAction),
     Update(UpdateAction),
     Album(String, QueueAction),
-    Artist(String, QueueAction),
+    Artist(String, Option<String>, QueueAction),
     Playlist(String, QueueAction),
     Tracks {
         tracks: Vec<Track>,
@@ -265,6 +283,13 @@ pub enum Action {
     Offline(OfflineAction),
     /// Library analysis.
     Analysis(AnalysisAction),
+    /// Split a combined album, named by its lead's account-qualified key,
+    /// into its copies.
+    KeepApart(String),
+    /// Forget the pairs a Keep apart stored: its toast's Undo.
+    UndoKeepApart(crate::store::ApartPairs),
+    /// Clear the stored exclusions involving this account-qualified album.
+    CombineAgain(String),
     /// Love or unlove a song, album or artist. `track` / `name` keep the
     /// Favorites view current.
     ToggleStar {
@@ -334,12 +359,13 @@ pub struct OndApp {
     engine: EngineHandle,
 
     login: Option<LoginForm>,
+    /// The first-run sheet, while it's up (first run, or after signing out).
+    onboarding: Option<onboarding::Onboard>,
     /// The server connection and who's signed in.
     session: Session,
-    /// Where the library sync is.
-    sync: SyncState,
 
     data: Data,
+    multi: all_sources::AllSources,
     actions: Vec<Action>,
     pending: Vec<Pending>,
     art: Art,
@@ -389,6 +415,10 @@ pub struct OndApp {
     /// Wakes the update checker for Check Now.
     update_now: Arc<tokio::sync::Notify>,
     updates: Updates,
+    /// The folder picker (the system's; a test's answers at once).
+    pick_folder: sources::FolderPicker,
+    /// Save dialog for exporting playlists as M3U.
+    save_m3u: sources::SaveFilePicker,
 }
 
 impl OndApp {
@@ -398,12 +428,12 @@ impl OndApp {
         let mut app = Self::build(&cc.egui_ctx, Paths::resolve()?, audio::default_backend())?;
         app.gpu = cc.wgpu_render_state.as_ref().map(|s| crate::visuals::gpu::Target::new(s.target_format, &s.adapter));
         // The app is running by now, so NSApp takes the menu bar.
-        let bridge = app.bridge.clone();
-        app.menu = crate::menu::MenuBar::install(move |cmd| bridge.post(Msg::Menu(cmd)));
+        let post = app.bridge.poster();
+        app.menu = crate::menu::MenuBar::install(move |cmd| post(Msg::Menu(cmd)));
         app.update_check.store(app.prefs.get(|s| s.updates) != crate::settings::UpdateCheck::Off, std::sync::atomic::Ordering::Relaxed);
-        let bridge = app.bridge.clone();
+        let post = app.bridge.poster();
         crate::updates::start(app.bridge.runtime(), &crate::updates::OND, app.update_check.clone(), app.update_now.clone(), move |r| {
-            bridge.post(Msg::UpdateChecked(r))
+            post(Msg::UpdateChecked(r))
         });
         // The window opened from this plan (see `main`); our title bar follows it.
         app.prefs.get(|s| s.window.plan()).apply_frame(&cc.egui_ctx);
@@ -415,32 +445,7 @@ impl OndApp {
         // busy task can't hold up the stream that feeds playback.
         let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(4).enable_all().build()?;
         let paths = Arc::new(paths);
-        // The db is only a mirror of the server, so an unreadable one is set aside
-        // and rebuilt by the sync that runs on connect.
-        let (library, moved_aside) = Library::open_or_recover(&paths.library_db)?;
         let mut notices: Vec<String> = Vec::new();
-        if let Some(aside) = moved_aside {
-            tracing::warn!("library database was unreadable; moved to {} and starting fresh", aside.display());
-            notices.push(format!("Your library database couldn't be read, so Ond is rebuilding it. The old copy is at {}.", aside.display()));
-        }
-        // Analysis results live apart from the (disposable) library mirror.
-        // Unlike the mirror they can't be rebuilt by a sync, so a set-aside
-        // file is worth telling the user about.
-        let (analyses, analyses_aside) = library::AnalysisStore::open_or_recover(paths.library_db.with_file_name("analysis.redb"))?;
-        let analyses = Arc::new(analyses);
-        if let Some(aside) = analyses_aside {
-            notices.push(format!("Your analysis results couldn't be read, so Ond started a new set. The old copy is at {}.", aside.display()));
-        }
-        match analyses.adopt(&library) {
-            Ok(0) => {}
-            Ok(n) => tracing::info!("moved {n} analysis results out of the library database"),
-            Err(e) => tracing::warn!("moving analysis results: {e}"),
-        }
-        let library = Arc::new(library);
-        let (tx, inbox) = channel();
-        let repaint = ctx.clone();
-        let bridge = Bridge::new(rt.handle().clone(), tx, Arc::new(move || repaint.request_repaint()), library.clone());
-
         let (prefs, loaded) = Prefs::open(&paths.config_file);
         if let Loaded::Unreadable { aside } = loaded {
             notices.push(format!("Your settings couldn't be read, so Ond reset them. Sign in again. The old file is at {}.", aside.display()));
@@ -453,6 +458,42 @@ impl OndApp {
                 prefs.edit(|s| s.offline_move_from = Some(from));
             }
         }
+        let data_dir = paths.library_db.parent().expect("the library has a data folder");
+        // A failed move mustn't keep Ond from opening (launched from the Dock,
+        // nobody would see why). This session runs on an empty mirror, which
+        // the sync fills, and the next start tries the move again.
+        let stores = match crate::storage::migrate(&paths, &prefs) {
+            Ok(()) => crate::storage::open(data_dir, prefs.get(|s| s.account()), &mut notices)?,
+            Err(e) => {
+                tracing::error!("moving the library into its account folder: {e:#}");
+                notices.push(format!("Ond couldn't move your library into its new folder ({e}). It will try again next time it starts."));
+                crate::storage::Stores::in_memory()?
+            }
+        };
+        let ond_store = match crate::store::OndStore::open_or_recover(data_dir.join("ond.redb")) {
+            Ok((store, aside)) => {
+                if aside.is_some() {
+                    notices.push("Ond couldn't read its saved favorites and playlists, so it started a fresh store.".into());
+                }
+                Arc::new(store)
+            }
+            Err(e) => {
+                tracing::error!("opening ond.redb: {e}");
+                notices.push(format!("Ond couldn't open its favorites and playlists store ({e}). Changes won't persist this session."));
+                Arc::new(crate::store::OndStore::in_memory()?)
+            }
+        };
+        let apart_pairs = ond_store.apart_pairs().unwrap_or_else(|e| {
+            notices.push(format!("Ond couldn't read its album separation choices ({e})."));
+            Default::default()
+        });
+        let mut multi = all_sources::AllSources::default();
+        multi.apart_pairs = apart_pairs;
+        let analyses = stores.analyses;
+        let (tx, inbox) = channel();
+        let repaint = ctx.clone();
+        let bridge = Bridge::new(rt.handle().clone(), tx, Arc::new(move || repaint.request_repaint()), stores.library, ond_store);
+        bridge.configure_storage(data_dir.to_owned(), paths.art_cache.clone(), prefs.get(|s| s.account()), &analyses);
         let saved = prefs.snapshot();
         theme::install(ctx, saved.theme);
         // Before the first frame, so the window never shows at 100% first.
@@ -465,9 +506,7 @@ impl OndApp {
         let cache = streamcache::StreamCache::new(cache_cfg, rt.handle().clone())?;
         let downloads = Downloads::start(
             saved.offline_dir.clone().unwrap_or_else(|| paths.offline.clone()),
-            if prefs.has_login() { saved.account_id() } else { None },
-            saved.offline_limit_gb.map(|gb| gb * 1_000_000_000),
-            saved.offline_move_from.clone(),
+            &saved,
             Downloads::opener(rt.handle().clone(), ctx.clone(), cache.clone()),
             &bridge,
             &mut notices,
@@ -484,65 +523,72 @@ impl OndApp {
         let output = Outputs::restore(&engine, prefs.clone());
         engine.send(Command::SetVolume(saved.volume));
         let scrobble = saved.scrobble;
-        let remote_bridge = bridge.clone();
+        let post_remote = bridge.poster();
         let now_playing = now_playing::Session::start(now_playing::Config {
+            account: saved.account(),
             status: engine.status.clone(),
             rt: rt.handle().clone(),
             art_dir: paths.art_cache.clone(),
-            retry_file: paths.library_db.with_file_name("scrobbles.json"),
+            retry_file: saved.account().map(|a| crate::storage::account_dir(data_dir, a)).unwrap_or_else(|| data_dir.join("Sources")).join("scrobbles.json"),
+            retry_root: Some(data_dir.to_owned()),
             scrobble,
-            remote: Arc::new(move |r| remote_bridge.post(Msg::Remote(r))),
+            remote: Arc::new(move |r| post_remote(Msg::Remote(r))),
         });
         let tap = now_playing.clone();
         bridge.forward_engine_events(engine.events.clone(), move |ev| tap.engine_event(ev));
         // Working offline, the library loads once downloads are open (only
         // what can play shows).
-        let work_offline = saved.work_offline && prefs.has_login() && !saved.signed_out;
-        if !work_offline {
-            bridge.load_local(None);
-        }
-        bridge.load_analyses(analyses.clone());
+        let work_offline = saved.work_offline && prefs.has_login();
+
         let analyzer = {
-            let (results, ticks) = (bridge.clone(), bridge.notifier());
+            let (post_analysis, ticks) = (bridge.poster(), bridge.notifier());
             analyze::Runner::start(analyze::Config {
                 store: analyses,
                 playback: playback_cache,
                 scratch: scratch_cache,
                 status: engine.status.clone(),
-                on_result: Arc::new(move |track_id, record| results.post(AnalysisMsg::Analyzed { track_id, record })),
+                on_result: Arc::new(move |key, record, session| {
+                    let account = key.account;
+                    let result = AnalysisMsg::Analyzed { key, record }.into();
+                    post_analysis(if let Some(session) = session { Msg::Source { account, session, message: Box::new(result) } } else { result });
+                }),
                 on_progress: ticks,
             })
         };
-        let art = Art::new(rt.handle().clone(), ctx.clone(), paths.art_cache.clone());
+        let art = Art::new(rt.handle().clone(), ctx.clone(), paths.art_cache.clone(), saved.account());
 
         // With a saved login the library opens at once (what's stored),
         // while the server is tried in the background.
         let login = if !prefs.has_login() {
             Some(LoginForm { server: "http://localhost:4533".into(), ..Default::default() })
-        } else if saved.signed_out {
-            Some(LoginForm { server: saved.server.clone(), username: saved.username.clone(), ..Default::default() })
+        } else if saved
+            .sources
+            .iter()
+            .all(|e| e.kind == crate::settings::SourceKind::Subsonic && (e.signed_out || (saved.signed_out && saved.account() == Some(e.id))))
+        {
+            Some(LoginForm { server: saved.server().to_owned(), username: saved.username().to_owned(), ..Default::default() })
         } else {
-            if !work_offline {
-                bridge.connect(saved.clone(), None);
-            }
             None
         };
         let connecting = login.is_none() && !work_offline;
+        // Without a login to resume, the window opens on the first-run sheet.
+        let onboarding = login.is_some().then(onboarding::Onboard::default);
 
         let shown = PrefsView::read(&prefs);
         let mut player = Player::default();
         player.queue.prefs = prefs.get(|s| s.queue);
         player.stop_on_unplayable = saved.offline_unplayable == crate::settings::Unplayable::Pause;
-        Ok(Self {
+        let mut app = Self {
             _rt: AppRuntime::new(rt),
             ctx: ctx.clone(),
             bridge,
             inbox,
             engine,
             login,
-            session: Session { settings: prefs.has_login().then(|| saved.clone()), connecting, work_offline, ..Default::default() },
-            sync: SyncState::default(),
+            onboarding,
+            session: Session::new(prefs.has_login().then(|| saved.clone()), connecting, work_offline),
             data: Data::default(),
+            multi,
             actions: Vec::new(),
             pending: Vec::new(),
             art,
@@ -561,21 +607,38 @@ impl OndApp {
             update_check: Arc::default(),
             update_now: Arc::default(),
             updates: Updates::default(),
+            pick_folder: sources::system_picker(),
+            save_m3u: sources::system_save_m3u(),
             prefs,
             analysis: Analysis::new(analyzer),
             favorites: Favorites::default(),
             menu: None,
             lyrics: HashMap::new(),
             song_stats: HashMap::new(),
-        })
+        };
+        app.start_sources();
+        Ok(app)
     }
 
     fn handle(&mut self, msg: impl Into<Msg>) {
         match msg.into() {
+            Msg::CopySeparation(pairs) => {
+                self.multi.apart_pairs = pairs;
+                self.project_sources();
+            }
+            Msg::OndPlaylistChanged => self.refresh_ond_playlists(),
+            Msg::MixedPlaylistReady { id, name, existing, added } => self.offer_mixed_playlist(id, name, existing, added),
+            Msg::OndPlaylists { generation, playlists, tracks, entries } => self.ond_playlists_loaded(generation, playlists, tracks, entries),
+            Msg::Source { account, session, message } => self.source_message(account, session, *message),
+            Msg::Scoped { session, message } => {
+                if session == self.bridge.session() {
+                    self.handle(*message);
+                }
+            }
             // From before a sign-out: stale, whatever it says.
             Msg::Connected { session, .. } | Msg::ConnectFailed { session, .. } | Msg::Unreachable { session, .. } if session != self.bridge.session() => {}
-            Msg::Connected { client, settings, server, new_account, password_saved, .. } => {
-                self.connected(client, settings, server, new_account, password_saved)
+            Msg::Connected { source, stores, settings, server, new_account, password_saved, .. } => {
+                self.connected(source, stores, settings, server, new_account, password_saved)
             }
             Msg::ConnectFailed { error, .. } => self.connect_failed(error),
             Msg::Unreachable { username, error, .. } => self.unreachable(username, error),
@@ -586,14 +649,18 @@ impl OndApp {
             Msg::Remote(r) => self.remote(r),
             Msg::Offline(m) => self.offline_msg(m),
             Msg::Starred { starred, ratings } => {
+                if let Some(account) = self.session.focus.filter(|a| self.multi.bridges.contains_key(a)) {
+                    self.multi.data.entry(account).or_default().served.starred = true;
+                }
                 self.data.served.starred = true;
-                self.favorites.load(starred, ratings);
+                self.load_favorites(starred, ratings);
             }
             Msg::Lyrics { track_id, lyrics } => {
                 self.lyrics.insert(track_id, crate::lyrics::Fetch::Done(lyrics));
             }
             Msg::SongStats { track_id, stats } => {
-                self.song_stats.insert(track_id, stats);
+                self.multi.song_stats.insert(track_id, stats);
+                self.project_song_stats();
             }
             Msg::UserMeta { meta, tracks } => self.favorites.note(meta, &tracks),
             Msg::StarDone { kind, id, on, seq, error } => self.star_done(kind, id, on, seq, error),
@@ -603,7 +670,22 @@ impl OndApp {
                 self.ui.recent_playlists.truncate(3);
                 self.go(Route::Playlist { id, name });
             }
+            Msg::M3uPathChosen { id, path } => {
+                if id.starts_with("ond:") {
+                    self.export_ond_m3u(id, path);
+                } else {
+                    self.bridge.export_playlist_m3u(self.session.source.clone(), id, path);
+                }
+            }
+            Msg::M3uExported { path, error } => match error {
+                None => {
+                    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("playlist.m3u");
+                    self.show_notice(format!("Exported {name}"));
+                }
+                Some(e) => self.show_failure(e.context("Couldn't export the playlist")),
+            },
             Msg::Menu(cmd) => self.command(cmd),
+            Msg::FolderChosen { target, path } => self.folder_chosen(target, path),
             Msg::UpdateChecked(result) => self.update_checked(result),
             Msg::ReleaseNotes(v, notes) => {
                 if let Some((n, slot)) = &mut self.updates.notes
@@ -669,7 +751,30 @@ impl OndApp {
     /// Applies one action. Most groups go to the part of the app they belong
     /// to; an action never asks for another one later, it applies it at once.
     fn apply(&mut self, action: Action) {
-        if self.locked(&action) {
+        let account = all_sources::action_account(&action).or(match &action {
+            Action::SyncNow
+            | Action::StopSync
+            | Action::MeasureLatency
+            | Action::AskSignOut
+            | Action::SignOut
+            | Action::SignInAgain
+            | Action::PlaylistEdit(_)
+            | Action::Offline(OfflineAction::Keep(..)) => self.session.focus,
+            _ => None,
+        });
+        if let Some(account) = account {
+            if self.multi.bridges.contains_key(&account) {
+                return self.with_source(account, |app| app.apply_inner(action));
+            }
+            if all_sources::action_account(&action).is_some() {
+                return;
+            }
+        }
+        self.apply_inner(action);
+    }
+
+    fn apply_inner(&mut self, action: Action) {
+        if self.locked(&action) || !self.can(&action) {
             return;
         }
         if self.ui.visualizer.is_some() && Self::leaves_visualizer(&action) {
@@ -680,6 +785,12 @@ impl OndApp {
             self.set_mode(Some(WindowMode::Full));
         }
         match action {
+            Action::Scope(a) => self.apply_scope(a),
+            Action::ForSource(account, action) => {
+                if self.multi.bridges.contains_key(&account) {
+                    self.with_source(account, |app| app.apply(*action));
+                }
+            }
             Action::Go(route) => self.go(route),
             Action::Back => {
                 self.ui.nav.back();
@@ -740,28 +851,24 @@ impl OndApp {
                 }
             },
             Action::NeedLyrics(track) => {
-                if !self.lyrics.contains_key(&track.id) && self.session.client.is_some() {
+                if !self.lyrics.contains_key(&track.id) && self.session.source.is_some() {
                     self.lyrics.insert(track.id.clone(), crate::lyrics::Fetch::Loading);
-                    self.bridge.fetch_lyrics(self.session.client.clone(), track.id.clone(), track.artist.clone(), track.title.clone());
+                    self.bridge.fetch_lyrics(self.session.source.clone(), track.id.clone(), track.artist.clone(), track.title.clone());
                 }
             }
-            Action::NeedSongStats(id) => {
-                if !self.song_stats.contains_key(&id) && self.session.client.is_some() {
-                    self.song_stats.insert(id.clone(), None);
-                    self.bridge.fetch_song_stats(self.session.client.clone(), id);
-                }
-            }
+            Action::NeedSongStats(id) => self.need_song_stats(id),
             Action::SyncNow => {
-                if let Some(client) = self.session.live().cloned()
-                    && self.sync.begin()
+                if let Some(source) = self.session.live().cloned()
+                    && (source.paged().is_some() || source.local().is_some())
+                    && self.session.sync.begin()
                 {
-                    self.bridge.sync_albums(client);
+                    self.bridge.sync_source(&source);
                 }
             }
             Action::StopSync => self.bridge.cancel_sync(),
             Action::Reload(key) => match key {
-                ListKey::Album(id) => self.bridge.open_album(self.session.client.clone(), id),
-                ListKey::Playlist(id) => self.bridge.open_playlist(self.session.client.clone(), id),
+                ListKey::Album(id) => self.bridge.open_album(self.session.source.clone(), id),
+                ListKey::Playlist(id) => self.bridge.open_playlist(self.session.source.clone(), id),
                 ListKey::Artist(_) => {}
             },
             Action::ClearArtCache => self.art.clear(),
@@ -773,9 +880,11 @@ impl OndApp {
             Action::SignIn => self.sign_in(),
             Action::CancelSignIn => self.cancel_sign_in(),
             Action::CloseLogin => self.login = None,
+            Action::Onboarding(event) => self.onboarding_event(event),
+            Action::Sources(a) => self.apply_source(a),
             Action::Update(a) => self.update_action(a),
             Action::Album(id, action) => self.play_album(id, action),
-            Action::Artist(name, action) => self.play_artist(name, action),
+            Action::Artist(name, id, action) => self.play_artist(name, id, action),
             Action::Playlist(id, action) => self.play_playlist(id, action),
             Action::Tracks { tracks, source, action } => self.queue_tracks(tracks, source, action),
             Action::TracksAnswered { tracks, source, action, keep } => self.queue_tracks_answered(tracks, source, action, keep),
@@ -789,10 +898,39 @@ impl OndApp {
             Action::Output(a) => self.apply_output(a),
             Action::Offline(a) => self.apply_offline(a),
             Action::Analysis(a) => self.apply_analysis(a),
+            Action::KeepApart(id) => self.keep_copies_apart(&id),
+            Action::UndoKeepApart(pairs) => self.bridge.separate_copies(crate::store::Separation::Forget(pairs)),
+            Action::CombineAgain(id) => {
+                if let Ok(key) = accounts::ItemKey::parse(&id) {
+                    self.bridge.separate_copies(crate::store::Separation::CombineAgain(key));
+                }
+            }
             Action::ToggleStar { kind, id, track, name } => self.toggle_star(kind, id, track.map(|t| *t), name),
             Action::Rate(id, rating) => self.rate(id, rating),
             Action::Command(cmd) => self.command(cmd),
             Action::PlaylistEdit(edit) => self.playlist_action(edit),
+        }
+    }
+
+    /// Whether the source in use can do what `action` asks of it: the
+    /// views don't offer what it can't, and this stops keys, menus and the
+    /// palette too.
+    fn can(&self, action: &Action) -> bool {
+        let caps = self.session.caps();
+        match action {
+            Action::Offline(OfflineAction::Keep(Keep::Tracks(tracks), _)) if !self.multi.bridges.is_empty() => {
+                tracks.iter().any(|t| self.session.for_item(&t.id).source_caps().downloads)
+            }
+            Action::Offline(OfflineAction::Keep(Keep::Playlist(id), _)) if id.starts_with("ond:") => {
+                self.session.accounts.values().any(|s| s.source_caps().downloads)
+            }
+            Action::ToggleStar { .. } => caps.stars,
+            Action::Rate(..) => caps.ratings,
+            Action::NewPlaylist => caps.playlists,
+            Action::PlaylistEdit(PlaylistAction::Create { .. } | PlaylistAction::Add { .. }) => caps.playlists,
+            Action::Offline(OfflineAction::Keep(..)) => caps.downloads,
+            Action::Offline(OfflineAction::WorkOffline(true)) => caps.network || self.session.accounts.values().any(|s| s.source_caps().network),
+            _ => true,
         }
     }
 
@@ -803,24 +941,64 @@ impl OndApp {
 
     /// Loads what the place we just arrived at needs.
     fn on_arrive(&mut self) {
+        let action = Action::Go(self.ui.nav.current().clone());
+        if let Some(account) = all_sources::action_account(&action).filter(|a| self.multi.bridges.contains_key(a)) {
+            return self.with_source(account, |app| app.on_arrive_inner());
+        }
+        self.on_arrive_inner();
+    }
+
+    fn on_arrive_inner(&mut self) {
         self.ui.track_sel = None;
         self.ui.focus = Focus::Main;
         match self.ui.nav.current().clone() {
-            Route::Album(id) => self.bridge.open_album(self.session.client.clone(), id),
-            Route::Artist { name, .. } => self.bridge.find_credited(name),
+            Route::Album(id) => self.bridge.open_album(self.session.source.clone(), id),
+            Route::Artist { name, .. } => {
+                if self.multi.bridges.is_empty() {
+                    self.bridge.find_credited(name);
+                } else {
+                    for (account, bridge) in &self.multi.bridges {
+                        if self.session.scope.includes(*account) {
+                            bridge.find_credited(name.clone());
+                        }
+                    }
+                }
+            }
             Route::Playlist { id, .. } => {
+                if id.starts_with("ond:") {
+                    if !self.data.playlist_tracks.contains_key(&id) {
+                        self.refresh_ond_playlists();
+                    }
+                    return;
+                }
                 // Offline, a kept playlist is rebuilt from its pin and the stored tracks.
                 if !self.session.online
                     && !self.data.playlist_tracks.contains_key(&id)
                     && let Some((_, ids)) = self.downloads.store.as_ref().and_then(|s| s.pin_tracks(&Pin::Playlist(id.clone())))
                 {
                     let by_id: HashMap<&str, &Track> = self.data.tracks.all.iter().map(|t| (t.id.as_str(), t)).collect();
-                    let tracks: Vec<Track> = ids.iter().filter_map(|i| by_id.get(i.as_str()).map(|t| (*t).clone())).collect();
+                    let tracks: Vec<Track> = ids
+                        .iter()
+                        .filter_map(|id| {
+                            let key = self.downloads.tracks().key(id)?;
+                            by_id.get(key.item.as_str()).map(|t| (*t).clone())
+                        })
+                        .collect();
                     self.data.playlist_tracks.insert(id.clone(), Arc::new(tracks));
                 }
-                self.bridge.open_playlist(self.session.client.clone(), id)
+                self.bridge.open_playlist(self.session.source.clone(), id)
             }
-            Route::Favorites => self.bridge.fetch_starred(self.session.client.clone()),
+            Route::Favorites => {
+                if self.multi.bridges.is_empty() {
+                    self.bridge.fetch_starred(self.session.source.clone());
+                } else {
+                    for (account, bridge) in &self.multi.bridges {
+                        if self.session.scope.includes(*account) {
+                            bridge.fetch_starred(self.session.get(*account).and_then(|s| s.live()).cloned());
+                        }
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -848,6 +1026,21 @@ impl OndApp {
             if self.ui.overlay.is_none() || matches!(cmd, Cmd::Shortcuts | Cmd::ZoomIn | Cmd::ZoomOut | Cmd::ZoomReset) {
                 self.actions.push(Action::Command(cmd));
             }
+        }
+    }
+
+    /// The window while signing in: the first-run sheet or the login form.
+    fn sign_in_ui(&mut self, ui: &mut egui::Ui) {
+        // Logging in needs the full window. (Read from this frame's copy
+        // of the preferences, which `logic` took, not by locking them.)
+        if self.ui.prefs.mode != WindowMode::Full {
+            self.set_mode(Some(WindowMode::Full));
+        }
+        self.login_ui(ui);
+        crate::csd::overlay(ui.ctx(), Some(toolbar::TOOLBAR_H));
+        // The form asks for its changes as actions too, applied once it's drawn.
+        for a in std::mem::take(&mut self.actions) {
+            self.apply(a);
         }
     }
 
@@ -1070,8 +1263,15 @@ impl eframe::App for OndApp {
         }
         // Back at the window: if the server's away, try it now rather than
         // at the end of the wait.
-        if self.session.unreachable && ctx.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::WindowFocused(true)))) {
-            self.bridge.retry_now();
+        if ctx.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::WindowFocused(true)))) {
+            if self.multi.bridges.is_empty() && self.session.unreachable {
+                self.bridge.retry_now();
+            }
+            for (account, bridge) in &self.multi.bridges {
+                if self.session.get(*account).is_some_and(|s| s.unreachable) {
+                    bridge.retry_now();
+                }
+            }
         }
         // The diagnostics bar keeps the server round trip fresh, but only while
         // something plays (idle stays idle).
@@ -1096,18 +1296,8 @@ impl eframe::App for OndApp {
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let started = std::time::Instant::now();
-        if self.login.is_some() {
-            // Logging in needs the full window. (Read from this frame's copy
-            // of the preferences, which `logic` took, not by locking them.)
-            if self.ui.prefs.mode != WindowMode::Full {
-                self.set_mode(Some(WindowMode::Full));
-            }
-            self.login_ui(ui);
-            crate::csd::overlay(ui.ctx(), Some(toolbar::TOOLBAR_H));
-            // The form asks for its changes as actions too, applied once it's drawn.
-            for a in std::mem::take(&mut self.actions) {
-                self.apply(a);
-            }
+        if self.signing_in() {
+            self.sign_in_ui(ui);
         } else {
             self.main_ui(ui);
         }

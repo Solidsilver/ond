@@ -14,8 +14,13 @@ use crate::window::WindowMode;
 /// after the frame, so the copy holds for the whole frame. Code that applies
 /// actions reads them as they are now, with [`OndApp::prefs_now`], since an
 /// action just applied may have changed them.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct PrefsView {
+    pub scope: accounts::Scope,
+    pub combine_copies: bool,
+    pub prefer_copy: crate::settings::PreferCopy,
+    /// Each source's name and colour, once there's more than one.
+    pub sources: super::source_look::SourceMarks,
     /// Full, Player or Mini.
     pub mode: WindowMode,
     /// The Player's lyrics drawer is open.
@@ -72,8 +77,12 @@ impl PrefsView {
     }
 
     pub fn read(prefs: &Prefs) -> Self {
-        let (server_managed, username_managed) = (prefs.managed("server"), prefs.managed("username"));
+        let (server_managed, username_managed) = (prefs.managed("server") || prefs.managed("sources"), prefs.managed("username") || prefs.managed("sources"));
         prefs.get(|s| Self {
+            scope: s.scope.clone(),
+            combine_copies: s.combine_copies,
+            prefer_copy: s.prefer_copy,
+            sources: super::source_look::SourceMarks::read(s),
             mode: s.window.mode,
             lyrics_open: s.window.lyrics_open,
             system_title_bar: s.window.system_title_bar,
@@ -106,6 +115,7 @@ impl PrefsView {
 
 /// A change to an appearance or behaviour preference.
 pub enum PrefsAction {
+    Scope(super::all_sources::ScopeAction),
     Theme(ThemePref),
     /// The interface's size, in percent.
     Zoom(u16),
@@ -121,6 +131,11 @@ pub enum PrefsAction {
     /// The alphabet rail beside long lists.
     AlphaRail(bool),
     ArtistPhotos(bool),
+    /// Show an album more than one source holds once, with every song
+    /// from each.
+    CombineCopies(bool),
+    /// Which copy of a combined song plays, is rated and is downloaded.
+    PreferCopy(crate::settings::PreferCopy),
     AlbumView(crate::settings::ViewMode),
     ArtistView(crate::settings::ViewMode),
     Scrobble(bool),
@@ -130,6 +145,11 @@ pub enum PrefsAction {
     Experimental(Experimental),
     /// How the queue behaves.
     Queue(crate::queue::QueuePrefs),
+    /// A source's name in the Sources tab and the switcher; empty, or its
+    /// default name (a server's host, a folder's name), goes back to that.
+    SourceName(accounts::AccountId, String),
+    /// A source's dot colour.
+    SourceColor(accounts::AccountId, accounts::SourceColor),
 }
 
 impl OndApp {
@@ -139,6 +159,7 @@ impl OndApp {
         use super::{AnalysisAction, OfflineAction, WindowAction};
         let path = match action {
             Action::Prefs(p) => match p {
+                PrefsAction::Scope(_) => return false,
                 PrefsAction::Theme(_) => "theme",
                 PrefsAction::Zoom(_) => "zoom",
                 PrefsAction::Accent(_) => "accent",
@@ -147,8 +168,13 @@ impl OndApp {
                 PrefsAction::Waveform(_) => "waveform",
                 PrefsAction::AlphaRail(_) => "alpha_rail",
                 PrefsAction::ArtistPhotos(_) => "artist_photos",
+                PrefsAction::CombineCopies(_) => "combine_copies",
+                PrefsAction::PreferCopy(_) => "prefer_copy",
                 PrefsAction::Scrobble(_) => "scrobble",
                 PrefsAction::Diagnostics(_) => "diagnostics_bar",
+                // A managed server is the Nix config's, name and all.
+                PrefsAction::SourceName(..) => return self.prefs.managed("server") || self.prefs.managed("sources"),
+                PrefsAction::SourceColor(..) => return false,
                 // Partly managed groups: the managed parts are put back.
                 PrefsAction::WaveformBars(_)
                 | PrefsAction::Experimental(_)
@@ -163,6 +189,13 @@ impl OndApp {
             Action::Offline(OfflineAction::WorkOffline(_)) => "work_offline",
             Action::Offline(OfflineAction::Unplayable(_)) => "offline_unplayable",
             Action::Update(super::UpdateAction::Check(_)) => "updates",
+            Action::Sources(
+                super::SourceAction::AskRemove(_)
+                | super::SourceAction::Remove(_)
+                | super::SourceAction::RemoveFolder(..)
+                | super::SourceAction::Choose(super::FolderTarget::Source(_))
+                | super::SourceAction::AddFolders,
+            ) => "sources",
             _ => return false,
         };
         self.prefs.managed(path)
@@ -170,6 +203,7 @@ impl OndApp {
 
     pub(super) fn apply_prefs(&mut self, action: PrefsAction) {
         match action {
+            PrefsAction::Scope(a) => self.apply_scope(a),
             PrefsAction::Theme(pref) => {
                 crate::theme::set_pref(&self.ctx, pref);
                 self.prefs.edit(|s| s.theme = pref);
@@ -192,6 +226,14 @@ impl OndApp {
             PrefsAction::WaveformBars(bars) => self.prefs.edit(|s| s.waveform_bars = bars),
             PrefsAction::AlphaRail(on) => self.prefs.edit(|s| s.alpha_rail = on),
             PrefsAction::ArtistPhotos(on) => self.prefs.edit(|s| s.artist_photos = on),
+            PrefsAction::CombineCopies(on) => {
+                self.prefs.edit(|s| s.combine_copies = on);
+                self.project_sources();
+            }
+            PrefsAction::PreferCopy(prefer) => {
+                self.prefs.edit(|s| s.prefer_copy = prefer);
+                self.favorites.combine(&self.data, prefer);
+            }
             PrefsAction::AlbumView(v) => self.prefs.edit(|s| s.album_view = v),
             PrefsAction::ArtistView(v) => self.prefs.edit(|s| s.artist_view = v),
             PrefsAction::Scrobble(on) => {
@@ -199,6 +241,34 @@ impl OndApp {
                 self.prefs.edit(|s| s.scrobble = on);
             }
             PrefsAction::Diagnostics(on) => self.prefs.edit(|s| s.diagnostics_bar = on),
+            PrefsAction::SourceName(id, name) => {
+                let edit = |s: &mut crate::settings::Settings| {
+                    let name = name.trim();
+                    let default = s.source(id).map(super::sidebar::default_name).unwrap_or_default();
+                    s.set_source_name(id, (!name.is_empty() && name != default).then(|| name.to_owned()));
+                };
+                self.prefs.edit(edit);
+                // The session's copy is what the switcher and Settings draw.
+                if let Some(s) = self.session.settings.as_mut() {
+                    edit(s);
+                }
+                for state in self.session.accounts.values_mut() {
+                    if let Some(s) = state.settings.as_mut() {
+                        edit(s);
+                    }
+                }
+            }
+            PrefsAction::SourceColor(id, color) => {
+                self.prefs.edit(|s| s.set_source_color(id, color));
+                if let Some(s) = self.session.settings.as_mut() {
+                    s.set_source_color(id, color);
+                }
+                for state in self.session.accounts.values_mut() {
+                    if let Some(s) = state.settings.as_mut() {
+                        s.set_source_color(id, color);
+                    }
+                }
+            }
             PrefsAction::Experimental(x) => self.prefs.edit(|s| s.experimental = x),
             PrefsAction::Queue(q) => {
                 self.prefs.edit(|s| s.queue = q);

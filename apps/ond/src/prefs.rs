@@ -84,20 +84,25 @@ impl Prefs {
     /// the caller, so a test needn't race the real one against the clock.
     fn open_debounced(path: impl Into<PathBuf>, debounce: Duration) -> (Self, Loaded) {
         let path = path.into();
-        let (settings, loaded) = match std::fs::read(&path) {
-            Err(_) => (Settings::default(), Loaded::Missing),
+        let (settings, loaded, migrated_legacy) = match std::fs::read(&path) {
+            Err(_) => (Settings::default(), Loaded::Missing, false),
             Ok(bytes) => match Settings::from_json(&bytes) {
                 Ok(mut s) => {
                     s.migrate();
-                    (s, Loaded::Read)
+                    let legacy = serde_json::from_slice::<serde_json::Value>(&bytes).ok().and_then(|v| v.as_object().cloned()).is_some_and(|map| {
+                        (!map.contains_key("sources") && ["server", "username", "account", "source_name", "source_color"].iter().any(|k| map.contains_key(*k)))
+                            || has_unkeyed_folders(&map)
+                    });
+                    (s, Loaded::Read, legacy)
                 }
                 Err(e) => {
                     let aside = set_aside(&path);
                     tracing::warn!("settings file unreadable ({e}); moved to {} and starting from defaults", aside.display());
-                    (Settings::default(), Loaded::Unreadable { aside })
+                    (Settings::default(), Loaded::Unreadable { aside }, false)
                 }
             },
         };
+        let previous_account = settings.account_id();
         let mut managed = Managed::read(&path);
         let mut users = serde_json::to_value(&settings).unwrap_or_default();
         managed.check(&users);
@@ -108,10 +113,15 @@ impl Prefs {
             settings.signed_out = true;
         }
         managed.apply(&mut settings);
+        if settings.account_id() != previous_account
+            && let Some(entry) = settings.subsonic_mut()
+        {
+            entry.id = accounts::AccountId::new();
+        }
         let offline_was = adopted.iter().find(|(key, _)| key == "offline_dir").map(|(_, old)| serde_json::from_value(old.clone()).ok().flatten());
         let prefs = Self::with(settings, path, Overlay { managed, users, offline_was }, debounce);
-        if !adopted.is_empty() {
-            // Saved with what was adopted.
+        if !adopted.is_empty() || migrated_legacy {
+            // Saved with what was adopted or migrated from the legacy shape.
             prefs.lock().revision += 1;
             prefs.handle.shared.wake.notify_all();
         }
@@ -165,17 +175,26 @@ impl Prefs {
     }
 
     /// Records a successful login, keeping every other preference as it is.
-    pub fn set_login(&self, server: &str, username: &str) {
+    pub fn set_login(&self, server: &str, username: &str, account: accounts::AccountId) {
         self.edit(|s| {
-            s.server = server.to_owned();
-            s.username = username.to_owned();
+            let entry = crate::settings::SourceEntry::subsonic(account, server, username);
+            match s.sources.iter_mut().find(|e| e.id == account) {
+                Some(slot) => {
+                    slot.id = account;
+                    slot.server = entry.server;
+                    slot.username = entry.username;
+                    slot.signed_out = false;
+                }
+                None => s.sources.insert(0, entry),
+            }
+            s.make_primary(account);
             s.signed_out = false;
         });
     }
 
     /// Whether an account was ever saved (else the login form starts empty).
     pub fn has_login(&self) -> bool {
-        self.get(|s| !s.server.is_empty())
+        self.get(|s| !s.sources.is_empty())
     }
 
     /// Whether a setting (dotted, like `playback.kbps`) is managed, so its
@@ -203,9 +222,14 @@ impl Prefs {
         Some(e)
     }
 
+    /// Flushes settings before a migration can move files under their identity.
+    pub fn flush_checked(&self) -> anyhow::Result<()> {
+        flush(&self.handle.shared)
+    }
+
     /// Writes now if anything changed (quitting, tests).
     pub fn flush(&self) {
-        flush(&self.handle.shared);
+        let _ = flush(&self.handle.shared);
     }
 }
 
@@ -220,7 +244,7 @@ impl Drop for Handle {
             let _ = writer.join();
         }
         // Whatever the writer hadn't got to yet (or if it never started).
-        flush(&self.shared);
+        let _ = flush(&self.shared);
     }
 }
 
@@ -240,7 +264,7 @@ fn writer_loop(shared: &Shared) {
             continue;
         }
         drop(state);
-        flush(shared);
+        let _ = flush(shared);
         state = shared.state.lock().unwrap_or_else(|e| e.into_inner());
     }
 }
@@ -248,26 +272,40 @@ fn writer_loop(shared: &Shared) {
 /// Writes the latest preferences if anything changed since the last write.
 /// The snapshot is taken while holding the writer lock, so a later write never
 /// carries older preferences than an earlier one.
-fn flush(shared: &Shared) {
+fn flush(shared: &Shared) -> anyhow::Result<()> {
     static WRITER: Mutex<()> = Mutex::new(());
     let _one = WRITER.lock().unwrap_or_else(|e| e.into_inner());
-    let snapshot = {
-        let mut state = shared.state.lock().unwrap_or_else(|e| e.into_inner());
+    let (snapshot, revision) = {
+        let state = shared.state.lock().unwrap_or_else(|e| e.into_inner());
         if state.revision == state.written {
-            return;
+            return Ok(());
         }
-        state.written = state.revision;
-        state.settings.clone()
+        (state.settings.clone(), state.revision)
     };
     if let Err(e) = write(&shared.path, &snapshot, &shared.overlay) {
         tracing::warn!("saving settings: {e}");
         if !shared.write_error_told.load(Ordering::Acquire) {
             *shared.write_error.lock().unwrap_or_else(|e| e.into_inner()) = Some(e.to_string());
         }
+        return Err(e);
     }
+    shared.state.lock().unwrap_or_else(|e| e.into_inner()).written = revision;
+    Ok(())
 }
 
 /// Writes `settings`, with the user's own values where managed ones lie over them.
+fn has_unkeyed_folders(map: &serde_json::Map<String, serde_json::Value>) -> bool {
+    let Some(sources) = map.get("sources").and_then(serde_json::Value::as_array) else { return false };
+    sources.iter().any(|entry| {
+        entry.get("folders").and_then(serde_json::Value::as_array).is_some_and(|folders| {
+            folders.iter().any(|item| match item {
+                serde_json::Value::Object(o) => o.get("key").and_then(serde_json::Value::as_str).is_none_or(str::is_empty),
+                _ => true,
+            })
+        })
+    })
+}
+
 fn write(path: &Path, settings: &Settings, overlay: &Overlay) -> anyhow::Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
@@ -323,6 +361,23 @@ mod tests {
     }
 
     #[test]
+    fn a_configured_offline_account_is_minted_and_saved_before_connecting() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        std::fs::write(&path, br#"{"server":"https://music.example.com","username":"me","work_offline":true}"#).unwrap();
+        let (prefs, _) = Prefs::open(&path);
+        let account = prefs.snapshot().account().unwrap();
+        prefs.flush();
+        assert_eq!(read(&path).account(), Some(account));
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(raw.contains(r#""sources""#), "{raw}");
+        assert!(!raw.contains(r#""account""#), "{raw}");
+        drop(prefs);
+        let (again, _) = Prefs::open(&path);
+        assert_eq!(again.snapshot().account(), Some(account));
+    }
+
+    #[test]
     fn an_existing_settings_file_reads_every_field() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("settings.json");
@@ -355,7 +410,7 @@ mod tests {
         let (prefs, loaded) = Prefs::open(&path);
         assert_eq!(loaded, Loaded::Read);
         let s = prefs.snapshot();
-        assert_eq!(s.server, "https://music.example.com");
+        assert_eq!(s.server(), "https://music.example.com");
         assert_eq!(s.stream_cache_mb, Some(4096));
         assert_eq!(s.output_device.as_deref(), Some("uid-umc22"));
         assert_eq!(s.device_modes.get("uid-umc22"), Some(&DeviceMode::BitPerfect));
@@ -397,7 +452,7 @@ mod tests {
         let (prefs, loaded) = Prefs::open(&path);
         assert_eq!(loaded, Loaded::Read, "read, not set aside");
         let s = prefs.snapshot();
-        assert_eq!((s.server.as_str(), s.username.as_str()), ("https://music.example.com", "me"), "still signed in");
+        assert_eq!((s.server(), s.username()), ("https://music.example.com", "me"), "still signed in");
         assert_eq!(s.theme, ThemePref::default());
         assert_eq!(s.playback.format, crate::playback::TranscodeFormat::default());
         assert_eq!(s.playback.replay_gain, crate::playback::RgMode::Album);
@@ -427,7 +482,7 @@ mod tests {
     #[test]
     fn a_file_without_a_login_reads_as_signed_out() {
         let s = Settings::from_json(br#"{ "theme": "dark" }"#).unwrap();
-        assert_eq!((s.server.as_str(), s.theme), ("", ThemePref::Dark));
+        assert_eq!((s.server(), s.theme), ("", ThemePref::Dark));
     }
 
     #[test]
@@ -521,10 +576,10 @@ mod tests {
         let path = dir.path().join("settings.json");
         let (prefs, _) = Prefs::open(&path);
         prefs.edit(|s| s.theme = ThemePref::Dark);
-        prefs.set_login("https://new", "me");
+        prefs.set_login("https://new", "me", accounts::AccountId::new());
         prefs.flush();
         let now = read(&path);
-        assert_eq!(now.server, "https://new");
+        assert_eq!(now.server(), "https://new");
         assert_eq!(now.theme, ThemePref::Dark);
         assert!(!now.signed_out);
     }
@@ -585,15 +640,15 @@ mod tests {
         std::fs::write(dir.path().join("managed.json"), r#"{ "server": "https://music.example.com", "offline_dir": "/data/music" }"#).unwrap();
         let (prefs, _) = Prefs::open(&path);
         let s = prefs.snapshot();
-        assert_eq!((s.server.as_str(), s.username.as_str(), s.signed_out), ("https://music.example.com", "me", true));
+        assert_eq!((s.server(), s.username(), s.signed_out), ("https://music.example.com", "me", true));
         assert_eq!(s.offline_dir.as_deref(), Some(Path::new("/data/music/Ond Offline")));
         assert_eq!(prefs.offline_dir_was(), Some(None), "it was the default folder");
         drop(prefs);
         let saved = read(&path);
-        assert_eq!((saved.server.as_str(), saved.signed_out), ("https://music.example.com", true), "adopted, so saved");
+        assert_eq!((saved.server(), saved.signed_out), ("https://music.example.com", true), "adopted, so saved");
         // Signed in, the next start is as usual.
         let (prefs, _) = Prefs::open(&path);
-        prefs.set_login("https://music.example.com", "me");
+        prefs.set_login("https://music.example.com", "me", accounts::AccountId::new());
         drop(prefs);
         let (prefs, _) = Prefs::open(&path);
         assert!(!prefs.get(|s| s.signed_out));

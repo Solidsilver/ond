@@ -324,12 +324,14 @@ impl ViewCtx<'_> {
             let text_w = rect.right() - col::INSET - right_g.size().x - col::RIGHT_GAP - x;
             ui.painter().galley(pos2(rect.right() - col::INSET - right_g.size().x, row.cy() - right_g.size().y / 2.0), right_g, t.muted);
             let color = crate::widgets::track_color(t, false, available);
-            row.two_lines(
+            // Where it comes from follows the artist, while sources are mixed.
+            row.two_lines_from(
                 ui,
                 x,
                 text_w,
                 (&item.track.title, FontId::proportional(12.5), color),
                 (item.track.artist.as_deref().unwrap_or(""), FontId::proportional(11.0), t.muted),
+                &self.queue_dots(item),
             );
         }
         row.describe(selected, || format!("{} by {}", item.track.title, item.track.artist.as_deref().unwrap_or("unknown artist")));

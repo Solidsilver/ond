@@ -13,7 +13,7 @@ fn window(dir: &Path, books: usize) -> Harness<'static, Option<RedeApp>> {
     let mut h = Harness::builder().with_size(egui::vec2(FULL[0], FULL[1])).with_pixels_per_point(2.0).with_os(egui::os::OperatingSystem::Mac).build_ui_state(
         |ui, app: &mut Option<RedeApp>| {
             if let Some(app) = app {
-                whole_window(ui, |ui| if app.login.is_some() { app.login_ui(ui) } else { app.main_ui(ui) });
+                whole_window(ui, |ui| if app.signing_in() { app.login_ui(ui) } else { app.main_ui(ui) });
             }
         },
         None,
@@ -45,7 +45,7 @@ fn a_books_download_button_offers_what_its_state_allows() {
     h.run_steps(3);
     h.get_by_label("Download");
     let store = open_store(app_mut(&mut h), dir.path());
-    let pin = offline::Pin::Book(sources::ItemKey::new(account().id, "book-1").to_string());
+    let pin = offline::Pin::Book(accounts::ItemKey::new(account().id, "book-1").to_string());
     store.pin(pin.clone(), "Dune", vec![offline::TrackRef::new("dune-1", Some("m4b".into()), Some(100))]);
     app_mut(&mut h).downloads.refresh();
     h.run_steps(3);
@@ -165,6 +165,18 @@ fn every_view_names_its_controls() {
         h.run_steps(3);
         h.check_accessibility();
     }
+    // The first-run sheet, on its one kind's form, and the account added
+    // with Done.
+    for (login, step, heading) in
+        [(Some(LoginForm::default()), shell::kit::OnboardingStep::Kinds, "Audiobookshelf"), (None, shell::kit::OnboardingStep::Added, "Where are your books?")]
+    {
+        app_mut(&mut h).login = login;
+        app_mut(&mut h).onboarding = Some(step);
+        h.run_steps(3);
+        h.get_by_label(heading);
+        h.check_accessibility();
+    }
+    app_mut(&mut h).onboarding = None;
     // Stats with a year of listening: the tiles, the charts and the
     // rankings, the books among them opening their pages.
     listening_history(app_mut(&mut h));
@@ -597,7 +609,7 @@ fn a_books_series_links_to_its_page_with_the_series_in_order() {
     assert!(first.x < sixth.x, "in the series' order, not the library's");
     assert!(h.query_by_label_contains("Piranesi").is_none(), "only the series' books");
     // With the first finished, the button goes on with the next.
-    let item = sources::ItemKey::new(account().id, "book-0");
+    let item = accounts::ItemKey::new(account().id, "book-0");
     let done = sources::Progress { item, position: sources::Position::from_secs(40_920.0), finished: true, at: Some(std::time::SystemTime::now()) };
     app_mut(&mut h).positions.insert("book-0".into(), done);
     h.run_steps(3);
@@ -691,7 +703,179 @@ fn signing_out_is_in_the_account_menu() {
     h.run_steps(2);
     assert!(app_mut(&mut h).login.is_some(), "the sign-in screen comes back");
     assert!(!app_mut(&mut h).session.signed_in());
+    assert_eq!(app_mut(&mut h).onboarding, Some(shell::kit::OnboardingStep::Kinds), "on the first-run sheet");
+    // Its one kind's form, filled in for the account, under it, signed
+    // out; with nothing signed in, nothing but the form leads on.
     h.get_by_label("Sign in");
+    assert_eq!(app_mut(&mut h).login.as_ref().map(|f| f.username.as_str()), Some("sam"));
+    h.get_by_label("sam, Audiobookshelf, Signed out");
+    assert!(h.query_by_label("Done").is_none());
+}
+
+/// A window signed in to sam, with alex signed in too but not in view.
+fn two_signed_in(dir: &Path) -> (Harness<'static, Option<RedeApp>>, accounts::AccountId) {
+    let mut h = window(dir, BOOKS.len());
+    let alex = crate::settings::Account { color: accounts::SourceColor::new(1), ..crate::settings::Account::new("https://two.example.com", "alex") };
+    let id = alex.id;
+    app_mut(&mut h).prefs.edit(|s| s.accounts.push(alex));
+    app_mut(&mut h).shown = PrefsView::read(&app_mut(&mut h).prefs);
+    h.run_steps(2);
+    (h, id)
+}
+
+/// Signing out of sam while alex is still signed in lists both over sam's
+/// form, and alex's row takes you back to alex.
+#[test]
+fn signing_out_with_another_account_signed_in_lets_you_pick_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut h, alex) = two_signed_in(dir.path());
+    app_mut(&mut h).apply(Action::SignOut);
+    h.run_steps(2);
+    assert_eq!(app_mut(&mut h).login.as_ref().map(|f| f.username.as_str()), Some("sam"), "the form is still sam's");
+    h.get_by_label("sam, Audiobookshelf, Signed out");
+    h.get_by_label("Done");
+    h.get_by_role_and_label(egui::accesskit::Role::Button, "alex, Audiobookshelf, Online").click();
+    h.run_steps(2);
+    let app = app_mut(&mut h);
+    assert!(!app.signing_in(), "the sheet is gone");
+    assert!(app.session.connecting, "alex's saved login is being tried");
+    assert_eq!(app.prefs.get(|s| s.scope.single()), Some(alex));
+}
+
+/// Done does the same, on the account still signed in.
+#[test]
+fn signing_out_with_another_account_signed_in_lets_done_go_back_to_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut h, alex) = two_signed_in(dir.path());
+    app_mut(&mut h).apply(Action::SignOut);
+    h.run_steps(2);
+    h.get_by_label("Done").click();
+    h.run_steps(2);
+    let app = app_mut(&mut h);
+    assert!(!app.signing_in());
+    assert_eq!(app.prefs.get(|s| s.scope.single()), Some(alex));
+}
+
+/// Without an account the window is the first-run sheet, which with one
+/// kind of source is Audiobookshelf's sign-in form: no tiles, and no Back
+/// to them. Signing in opens the library.
+#[test]
+fn signing_in_goes_through_the_first_run_sheet() {
+    use shell::kit::OnboardingStep;
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = window(dir.path(), BOOKS.len());
+    let ctx = h.ctx.clone();
+    // A folder of its own, with no account saved in it.
+    *h.state_mut() = None;
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = signed_out(&ctx, dir.path());
+    app.onboarding = Some(OnboardingStep::Kinds);
+    *h.state_mut() = Some(app);
+    h.run_steps(2);
+    h.get_by_role_and_label(egui::accesskit::Role::TextInput, "Server");
+    assert!(h.query_by_label_contains("Your own server").is_none(), "no tile to pick");
+    assert!(h.query_by_label("Back").is_none(), "nothing to go back to");
+    assert!(h.query_by_label("Done").is_none(), "no way on without an account");
+
+    let account = account();
+    let client = abs::Client::new("http://127.0.0.1:9", account.device()).unwrap();
+    let source: std::sync::Arc<dyn sources::Source> = std::sync::Arc::new(sources::AbsSource::new(account.id, client, Vec::new()));
+    let app = app_mut(&mut h);
+    let session = app.bridge.session();
+    app.handle(crate::bridge::AccountMsg::SignedIn { session, account, source, shelf: shelf(dir.path()), warning: None });
+    h.run_steps(2);
+    assert_eq!(app_mut(&mut h).onboarding, Some(OnboardingStep::Added));
+    h.get_by_label("sam, Audiobookshelf, Online");
+    h.get_by_label("Add another");
+    h.get_by_label("Done").click();
+    h.run_steps(2);
+    assert!(!app_mut(&mut h).signing_in(), "the library is up");
+}
+
+/// A second account's sign-in, as the bridge would answer it, for the
+/// account `name` at `server`, its shelf under `dir`.
+fn second_account_signs_in(h: &mut Harness<'static, Option<RedeApp>>, dir: &Path, server: &str, name: &str) -> accounts::AccountId {
+    let app = app_mut(h);
+    let account = app.prefs.get(|s| s.account_for_sign_in(server, name, Some(crate::settings::SignInMethod::Password)));
+    let id = account.id;
+    let client = abs::Client::new("http://127.0.0.1:9", account.device()).unwrap();
+    let source: std::sync::Arc<dyn sources::Source> = std::sync::Arc::new(sources::AbsSource::new(account.id, client, Vec::new()));
+    let shelf_dir = dir.join(name);
+    std::fs::create_dir_all(&shelf_dir).unwrap();
+    let session = app.bridge.session();
+    app.handle(crate::bridge::AccountMsg::SignedIn { session, account, source, shelf: shelf(&shelf_dir), warning: None });
+    h.run_steps(2);
+    id
+}
+
+/// Opens the switcher's menu and picks Add source….
+fn add_source(h: &mut Harness<'static, Option<RedeApp>>) {
+    h.get_by_label("sam, books.example.com").click();
+    h.run_steps(4);
+    h.get_by_label("Add source…").click();
+    h.run_steps(3);
+}
+
+/// Add source… opens the form over the account in view, which lists it.
+/// Checking a server there leaves that account's session running, and
+/// once the new account signs in the sheet lists both with Add another and
+/// Done, which lands on the new one.
+#[test]
+fn add_source_then_signing_in_adds_a_second_account_and_done_lands_on_it() {
+    use shell::kit::OnboardingStep;
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = window(dir.path(), BOOKS.len());
+    h.run_steps(2);
+    let sam = account().id;
+    let session = app_mut(&mut h).bridge.session();
+    add_source(&mut h);
+    assert_eq!(app_mut(&mut h).onboarding, Some(OnboardingStep::Kinds));
+    h.get_by_role_and_label(egui::accesskit::Role::TextInput, "Server");
+    h.get_by_label("sam, Audiobookshelf, Online");
+    h.get_by_label("Cancel");
+    assert!(h.query_by_label("Done").is_none(), "Cancel stands in for it");
+
+    app_mut(&mut h).login.as_mut().unwrap().server = "http://127.0.0.1:9".into();
+    h.get_by_label("Sign in").click();
+    h.run_steps(2);
+    let app = app_mut(&mut h);
+    assert_eq!(app.bridge.session(), session, "checking the server leaves sam's session alone");
+    assert!(app.session.signed_in() && app.session.account.as_ref().map(|a| a.id) == Some(sam));
+
+    let alex = second_account_signs_in(&mut h, dir.path(), "https://two.example.com", "alex");
+    assert_eq!(app_mut(&mut h).onboarding, Some(OnboardingStep::Added));
+    h.get_by_label("sam, Audiobookshelf, Online");
+    h.get_by_label("alex, Audiobookshelf, Online");
+    h.get_by_label("Add another");
+    h.get_by_label("Done").click();
+    h.run_steps(2);
+    let app = app_mut(&mut h);
+    assert!(!app.signing_in(), "the library is up");
+    assert_eq!(app.session.account.as_ref().map(|a| a.id), Some(alex));
+    assert_ne!(app.bridge.session(), session, "sam's work in flight is dropped");
+    assert_eq!(app.prefs.get(|s| (s.accounts.len(), s.scope.single())), (2, Some(alex)));
+}
+
+/// Cancel on the Add source… sheet returns to the library on the account
+/// that was in view, its session and its books as they were.
+#[test]
+fn cancelling_add_source_keeps_the_current_account() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = window(dir.path(), BOOKS.len());
+    app_mut(&mut h).go(book_route(1));
+    h.run_steps(2);
+    let session = app_mut(&mut h).bridge.session();
+    add_source(&mut h);
+    assert!(app_mut(&mut h).signing_in());
+    app_mut(&mut h).login.as_mut().unwrap().server = "two.example.com".into();
+    h.get_by_label("Cancel").click();
+    h.run_steps(2);
+    let app = app_mut(&mut h);
+    assert!(!app.signing_in() && app.login.is_none());
+    assert!(app.session.signed_in() && app.session.account.as_ref().map(|a| a.id) == Some(account().id));
+    assert_eq!(app.bridge.session(), session);
+    assert_eq!(app.prefs.get(|s| s.accounts.len()), 1, "nothing was added");
+    assert_eq!(*app.ui.nav.current(), book_route(1), "still on the book");
 }
 
 #[test]
@@ -1172,12 +1356,12 @@ fn the_sidebar_gear_opens_settings_in_the_column_and_the_rail() {
     let mut h = window(dir.path(), BOOKS.len());
     for collapsed in [false, true] {
         app_mut(&mut h).apply_prefs(PrefsAction::CollapseSidebar(collapsed));
-        app_mut(&mut h).ui.settings = super::settings_page::Tab::Account;
+        app_mut(&mut h).ui.settings = super::settings_page::Tab::Sources;
         h.run_steps(3);
         h.get_by_label(&shell::keys::shown("Settings (⌘,)")).click();
         h.run_steps(3);
         assert_eq!(app_mut(&mut h).sheet, Some(super::sheets::Sheet::Settings));
-        assert_eq!(app_mut(&mut h).ui.settings, super::settings_page::Tab::Account, "on the tab it was last on");
+        assert_eq!(app_mut(&mut h).ui.settings, super::settings_page::Tab::Sources, "on the tab it was last on");
         h.key_press(egui::Key::Escape);
         h.run_steps(2);
         assert_eq!(app_mut(&mut h).sheet, None);
@@ -1190,17 +1374,32 @@ fn settings_lists_its_tabs_and_each_names_its_controls() {
     let mut h = window(dir.path(), BOOKS.len());
     app_mut(&mut h).apply(Action::OpenSettings(super::settings_page::Tab::Playback));
     h.run_steps(3);
-    h.get_by_label("Account").click();
+    assert!(h.query_by_label("Account").is_none(), "the account is on Sources");
+    app_mut(&mut h).sync.synced = Some(std::time::SystemTime::now() - std::time::Duration::from_secs(12 * 60));
+    h.get_by_label("Sources").click();
     h.run_steps(3);
-    assert_eq!(app_mut(&mut h).ui.settings, super::settings_page::Tab::Account);
+    assert_eq!(app_mut(&mut h).ui.settings, super::settings_page::Tab::Sources);
     h.check_accessibility();
-    for label in ["https://books.example.com", "sam", "Sync now", "Sign out…"] {
+    // The account in view: its address, who's signed in and how, and the
+    // last sync.
+    for label in ["https://books.example.com", "Signed in as", "With a password.", "Synced 12 minutes ago", "Sync now"] {
         h.get_by_label(label);
     }
-    h.get_by_label_contains("Signed in with a password.");
-    // Sign out… asks first; Cancel goes back to Settings.
-    h.get_by_label("Sign out…").click();
-    h.run_steps(3);
+    app_mut(&mut h).sync.running = true;
+    app_mut(&mut h).sync.applied = 40;
+    h.run_steps(2);
+    h.get_by_label("Syncing… 40 books");
+    app_mut(&mut h).sync.running = false;
+    h.run_steps(2);
+    // Sign out… is in its row's menu, and asks first; Cancel goes back to
+    // Settings.
+    let sign_out = |h: &mut egui_kittest::Harness<'_, _>| {
+        h.get_by_label("sam, Audiobookshelf, books.example.com").click();
+        h.run_steps(3);
+        h.get_by_label("Sign out…").click();
+        h.run_steps(3);
+    };
+    sign_out(&mut h);
     assert_eq!(app_mut(&mut h).sheet, Some(super::sheets::Sheet::SignOut { from_settings: true }));
     h.get_by_label("Sign out of books.example.com?");
     h.check_accessibility();
@@ -1208,8 +1407,7 @@ fn settings_lists_its_tabs_and_each_names_its_controls() {
     h.run_steps(3);
     assert_eq!(app_mut(&mut h).sheet, Some(super::sheets::Sheet::Settings), "Settings is back");
     assert!(app_mut(&mut h).login.is_none());
-    h.get_by_label("Sign out…").click();
-    h.run_steps(3);
+    sign_out(&mut h);
     h.get_by_label("Sign out").click();
     h.run_steps(2);
     assert!(app_mut(&mut h).login.is_some(), "signed out, to the sign-in screen");
@@ -1826,4 +2024,88 @@ fn an_empty_query_offers_the_books_in_progress_and_none_found_says_so() {
     h.run_steps(3);
     type_in_palette(&mut h, "zzqx");
     h.get_by_label("No books match");
+}
+
+#[test]
+fn switching_accounts_from_the_sidebar_shows_signed_out_rows_and_activates_the_picked_account() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = window(dir.path(), BOOKS.len());
+    let second =
+        crate::settings::Account { color: accounts::SourceColor::new(1), signed_out: true, ..crate::settings::Account::new("https://two.example.com", "alex") };
+    let second_id = second.id;
+    app_mut(&mut h).prefs.edit(|s| {
+        s.accounts.push(second);
+    });
+    app_mut(&mut h).shown = PrefsView::read(&app_mut(&mut h).prefs);
+    h.run_steps(2);
+
+    h.get_by_label("sam, books.example.com").click();
+    h.run_steps(4);
+    h.get_by_label("alex, Signed out").click();
+    h.run_steps(2);
+
+    assert_eq!(app_mut(&mut h).prefs.get(|s| s.scope.single()), Some(second_id));
+    let form = app_mut(&mut h).login.as_ref().expect("signed-out account opens sign-in");
+    assert_eq!(form.username, "alex");
+    assert_eq!(form.server, "https://two.example.com");
+}
+
+/// A second account on file, signed in but not in view.
+fn second_account(app: &mut RedeApp) -> accounts::AccountId {
+    let other = crate::settings::Account { color: accounts::SourceColor::new(3), ..crate::settings::Account::new("https://office.example.com", "alex") };
+    let id = other.id;
+    app.prefs.edit(move |s| s.accounts.push(other));
+    id
+}
+
+/// Manage sources… opens Settings on Sources, which lists every account;
+/// a row's menu renames and recolours it in place, and Remove… asks
+/// first, saying what goes, before the account is gone.
+#[test]
+fn the_sources_tab_lists_every_account_and_its_menu_renames_recolours_and_removes() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = window(dir.path(), BOOKS.len());
+    let alex = second_account(app_mut(&mut h));
+    h.run_steps(2);
+    h.get_by_label("sam, books.example.com").click();
+    h.run_steps(4);
+    h.get_by_label("Manage sources…").click();
+    h.run_steps(3);
+    assert_eq!(app_mut(&mut h).sheet, Some(super::sheets::Sheet::Settings));
+    assert_eq!(app_mut(&mut h).ui.settings, super::settings_page::Tab::Sources);
+    h.check_accessibility();
+    h.get_by_label("Add source…");
+
+    // The account in view: rename it in place.
+    h.get_by_label("sam, Audiobookshelf, books.example.com").click();
+    h.run_steps(3);
+    h.get_by_label("Rename").click();
+    h.run_steps(3);
+    h.get_by_label("Source name").type_text("Home");
+    h.run();
+    h.key_press(egui::Key::Enter);
+    h.run_steps(3);
+    assert_eq!(app_mut(&mut h).prefs.get(|s| s.account_by_id(account().id).map(|a| a.display_name().to_owned())), Some("Home".into()));
+    // The other: its colour, then Remove….
+    h.get_by_label("alex, Audiobookshelf, office.example.com").click();
+    h.run_steps(3);
+    assert_eq!(h.query_all_by_label("Sync now").count(), 1, "only the account in view syncs: its button, not this menu");
+    assert!(h.query_by_label("Rename").is_some());
+    h.get_by_label("Violet").click();
+    h.run_steps(3);
+    assert_eq!(app_mut(&mut h).prefs.get(|s| s.account_by_id(alex).map(|a| a.color)), Some(accounts::SourceColor::new(4)));
+    h.get_by_label("alex, Audiobookshelf, office.example.com").click();
+    h.run_steps(3);
+    h.get_by_label("Remove…").click();
+    h.run_steps(3);
+    assert_eq!(app_mut(&mut h).sheet, Some(super::sheets::Sheet::RemoveSource(alex)));
+    h.get_by_label("Remove alex?");
+    h.get_by_label_contains("Its downloads and its library on this computer are deleted");
+    h.check_accessibility();
+    h.get_by_label("Remove").click();
+    h.run_steps(3);
+    assert_eq!(app_mut(&mut h).sheet, Some(super::sheets::Sheet::Settings), "back on the tab");
+    assert_eq!(app_mut(&mut h).prefs.get(|s| s.accounts.iter().map(|a| a.id).collect::<Vec<_>>()), [account().id]);
+    assert!(h.query_by_label_contains("alex").is_none());
+    assert!(app_mut(&mut h).session.signed_in(), "the account in view carries on");
 }

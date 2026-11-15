@@ -63,7 +63,7 @@ impl ViewCtx<'_> {
         let look = self.ui.prefs.waveform_bars;
         let wave = if s.wave_h > 0.0 && self.ui.prefs.waveform {
             let grid = WaveGrid::along(bar, painter.pixels_per_point(), look);
-            let id = self.player.queue.current.as_ref().map(|c| c.track.id.clone());
+            let id = self.player.queue.current.as_ref().map(|c| c.key.clone());
             id.and_then(|id| self.waveforms.bars(&id, grid.n)).map(|bars| (grid, bars))
         } else {
             None

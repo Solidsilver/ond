@@ -21,6 +21,11 @@
   <url type="bugtracker">https://github.com/Solidsilver/ond/issues</url>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="0.6.0" date="2026-11-14">
+      <description>
+        <p>Local music folders, several sources at once, and an option to combine matching albums.</p>
+      </description>
+    </release>
     <release version="0.5.0" date="2026-11-11">
       <description>
         <p>Generated covers, interface zoom, clearer settings and notices with Retry and Undo.</p>

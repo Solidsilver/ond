@@ -21,6 +21,12 @@
 //!   (and [`switch_tinted`]), [`stepper`] and its [`step_button`], and
 //!   [`choice_chip`] (one of a grid of choices, lit when on) and
 //!   [`stepper_chip`] (one whose value is the user's own, stepped in place).
+//! - [`form`]: a form's pieces, for signing in and a source's settings: a
+//!   [`TextField`] with its [`field_label`], [`field_error`] and
+//!   [`field_help`], the full-width [`form_button`] (the main way in, or a
+//!   quieter one, either able to say it's waiting), the [`or_divider`]
+//!   between two ways in, a [`notice`] to read, and a [`folder_list`] (the
+//!   folders a source reads, each with a ×, and Choose folder…).
 //! - [`rows`]: a [`group`] of [`setting`]s (or [`row_with`] and its
 //!   [`Head`]), hairlines between them ([`divider`]), [`managed`] to lock
 //!   one; [`kv_section`], [`kv_row`] and [`kv_text`] (a label and its value,
@@ -33,8 +39,33 @@
 //!   [`switch_row`], and [`menu_label`] (a quiet button with a chevron that
 //!   opens one).
 //! - [`sheets`]: [`sheet_frame`] (the frame a sheet over the window is drawn
-//!   in), [`sheet_header`] (its title, and a × that closes it), and the
+//!   in), [`sheet_header`] (its title, and a × that closes it), a question
+//!   in one ([`confirm`], its verb in red, or [`ask`], filled), and the
 //!   [`shortcuts_sheet`] that sets out an app's [`ShortcutGroup`]s.
+//! - [`sources`]: a source as the app describes it ([`SourceInfo`]), the
+//!   [`source_dot`] in its colour (and [`source_dots`], stacked, for All
+//!   sources; [`source_dot_lead`] in front of a line of text,
+//!   [`source_dot_after`] and [`text_then_dots`] after one,
+//!   [`source_label`], a dot and a name as one item, and [`source_cell`],
+//!   one in a table's Source column, or [`sources_cell`], several), and the sidebar's
+//!   foot, [`source_switcher`]: what's in scope
+//!   ([`SourceSwitcher`], drawn in the app's [`SwitcherLook`] at its
+//!   [`SwitcherPlace`]) and a menu to change it, which says what was picked
+//!   as a [`SourcePick`].
+//! - [`source_row`](mod@source_row): a source in Settings' Sources tab,
+//!   [`source_row`](fn@source_row) ([`SourceRow`]): its dot, name, kind and
+//!   state, and a menu ([`SourceRowMenu`]) to rename it in place, recolour
+//!   it with the [`source_color_picker`], sync it, sign out or remove it,
+//!   which says what was chosen as a [`SourceRowEvent`].
+//! - [`source_chips`](mod@source_chips): the filter chips over a library
+//!   page in All sources, [`source_chips`](fn@source_chips), read from an
+//!   [`accounts::Scope`], which say what was clicked as a [`SourceChip`].
+//! - [`onboarding`](mod@onboarding): the first-run sheet,
+//!   [`onboarding`](fn@onboarding): the app's welcome line over the kinds
+//!   of source it can add ([`SourceKind`]), a kind's form once picked, and
+//!   the sources added so far, with Add another and Done. The app holds
+//!   where it is ([`OnboardingStep`]) and gets back what happened as an
+//!   [`OnboardingEvent`].
 //! - [`palette`](mod@palette): the command [`palette`](fn@palette) over the window (⌘K),
 //!   filled by the app's [`PaletteRows`], with its [`PaletteState`] and
 //!   [`palette_icon_tile`] for a row without a cover; and the sidebar's
@@ -72,12 +103,17 @@ pub mod charts;
 pub mod controls;
 pub mod covers;
 pub mod download;
+pub mod form;
 pub mod menus;
 pub mod nav;
+pub mod onboarding;
 pub mod palette;
 pub mod rows;
 pub mod settings;
 pub mod sheets;
+pub mod source_chips;
+pub mod source_row;
+pub mod sources;
 pub mod text;
 pub mod toasts;
 
@@ -86,12 +122,17 @@ pub use charts::*;
 pub use controls::*;
 pub use covers::*;
 pub use download::*;
+pub use form::*;
 pub use menus::*;
 pub use nav::*;
+pub use onboarding::*;
 pub use palette::*;
 pub use rows::*;
 pub use settings::*;
 pub use sheets::*;
+pub use source_chips::*;
+pub use source_row::*;
+pub use sources::*;
 pub use text::*;
 pub use toasts::Toasts;
 
@@ -110,4 +151,29 @@ fn themed<S: 'static>(state: S, mut body: impl FnMut(&mut egui::Ui, &mut S) + 's
         },
         (false, state),
     )
+}
+
+/// A harness `size` big on the sidebar's ground, in `pref`'s theme, at
+/// twice the pixels, that draws `body` once the theme's fonts are in: the
+/// kit's snapshot scenes.
+#[cfg(test)]
+fn canvas(size: egui::Vec2, pref: crate::theme::ThemePref, mut body: impl FnMut(&mut egui::Ui) + 'static) -> egui_kittest::Harness<'static, bool> {
+    let dark = matches!(pref, crate::theme::ThemePref::Dark);
+    egui_kittest::Harness::builder()
+        .with_size(size)
+        .with_pixels_per_point(2.0)
+        .with_theme(if dark { egui::Theme::Dark } else { egui::Theme::Light })
+        .build_ui_state(
+            move |ui, installed: &mut bool| {
+                if !std::mem::replace(installed, true) {
+                    crate::theme::install(ui.ctx(), pref);
+                    ui.ctx().request_repaint();
+                    return;
+                }
+                let ground = crate::theme::Tokens::of(ui).sidebar;
+                ui.ctx().layer_painter(egui::LayerId::background()).rect_filled(egui::Rect::EVERYTHING, 0.0, ground);
+                body(ui);
+            },
+            false,
+        )
 }

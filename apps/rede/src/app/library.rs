@@ -651,7 +651,7 @@ mod tests {
     /// `secs` into a ten-hour book, `hours_ago` (or undated).
     fn heard(positions: &mut Positions, id: &str, secs: f64, finished: bool, hours_ago: Option<u64>) {
         let at = hours_ago.map(|h| std::time::SystemTime::now() - std::time::Duration::from_secs(h * 3_600));
-        let item = sources::ItemKey::new(sources::AccountId::from_uuid(uuid::Uuid::nil()), id);
+        let item = accounts::ItemKey::new(accounts::AccountId::from_uuid(uuid::Uuid::nil()), id);
         positions.insert(id.into(), sources::Progress { item, position: sources::Position::from_secs(secs), finished, at });
     }
 
@@ -737,9 +737,9 @@ mod tests {
         let (list, positions) = listened_shelf();
         let mut books = Books::default();
         books.set(list.clone());
-        let account = sources::AccountId::from_uuid(uuid::Uuid::nil());
+        let account = accounts::AccountId::from_uuid(uuid::Uuid::nil());
         let summary = |id: &str, done: usize| offline::PinSummary {
-            pin: offline::Pin::Book(sources::ItemKey::new(account, id).to_string()),
+            pin: offline::Pin::Book(accounts::ItemKey::new(account, id).to_string()),
             label: id.into(),
             total: 2,
             done,

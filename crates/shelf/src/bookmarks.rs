@@ -4,7 +4,7 @@
 
 use super::*;
 use crate::model::BookmarkEditV1;
-use sources::AccountId;
+use accounts::AccountId;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BookmarkChange {

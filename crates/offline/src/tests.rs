@@ -1062,3 +1062,29 @@ fn a_rejected_attempt_is_visible_before_retry_exhaustion_without_exposing_its_to
     assert!(snapshot.last_errors["file"].message.contains("401"));
     assert!(!format!("{snapshot:?}").contains("download-secret"));
 }
+
+#[test]
+fn removing_named_songs_updates_all_their_pins_and_keeps_unrelated_downloads() {
+    let dir = tempfile::tempdir().unwrap();
+    let rt = rt();
+    let body = data(1024);
+    let server = RangeServer::start(body, flac());
+    let s = store(dir.path(), &rt);
+    s.set_source(Some(urls(&server)));
+    s.pin(Pin::Album("a".into()), "Album", vec![track("remove", 1024), track("keep", 1024)]);
+    s.pin(Pin::Playlist("p".into()), "Playlist", vec![track("remove", 1024), track("other", 1024)]);
+    s.pin(Pin::Track("remove".into()), "Song", vec![track("remove", 1024)]);
+    wait_until("the three downloads", || ["remove", "keep", "other"].iter().all(|id| s.snapshot().is_done(id)));
+    let removed = s.local_path("remove").unwrap();
+    let kept = s.local_path("keep").unwrap();
+    s.unpin_tracks(&["remove".into(), "not-a-stored-track".into()]);
+    assert!(!s.is_pinned(&Pin::Track("remove".into())));
+    assert_eq!(s.pin_tracks(&Pin::Album("a".into())).unwrap().1, ["keep"]);
+    assert_eq!(s.pin_tracks(&Pin::Playlist("p".into())).unwrap().1, ["other"]);
+    wait_until("only the removed file to disappear", || !removed.exists());
+    assert!(kept.exists());
+    drop(s);
+    let s = store(dir.path(), &rt);
+    assert!(!s.snapshot().tracks.contains_key("remove"));
+    assert!(s.snapshot().is_done("keep") && s.snapshot().is_done("other"));
+}

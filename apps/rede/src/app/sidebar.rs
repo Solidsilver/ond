@@ -2,6 +2,11 @@
 //! search field that opens the palette (⌘K), the places to browse under the
 //! library's name, and the account at the foot, with its state (connected,
 //! syncing, offline) and its menu, and the keyboard shortcuts beside it.
+//! The foot is the kit's source switcher with every configured account
+//! (active one at its live state, others online or signed out); clicking another
+//! switches to it via `Action::SwitchAccount`, and Add source… opens the
+//! first-run sheet over it (`Action::AddSource`), while the account menu's
+//! rows are Rede's, drawn under it.
 //!
 //! The places are a list so Authors and Collections join Home, Library,
 //! Series, Downloads and Stats as rows when they come. Downloads carries a ring
@@ -16,11 +21,11 @@
 use super::nav::Route;
 use super::view_ctx::ViewCtx;
 use super::{Action, PrefsAction, RedeApp};
+use accounts::{OfflineReason, Scope, SourceState};
 use egui::{FontId, Rect, Sense, Ui, pos2, vec2};
 use shell::icons::{self, Icon};
 use shell::kit;
 use shell::theme::{Tokens, semibold};
-use std::time::Duration;
 
 /// The full column's width: Ond's sidebar at its default.
 pub const SIDEBAR_W: f32 = 216.0;
@@ -29,7 +34,8 @@ pub const RAIL_W: f32 = 52.0;
 /// The page keeps at least this much beside the full column before it gives
 /// way to the rail, as Ond's content does.
 const CONTENT_MIN: f32 = 604.0;
-/// The account's row at the foot, and the buttons beside it.
+/// The account's row at the foot (the switcher's two-line look), and the
+/// buttons beside it.
 const ACCOUNT_H: f32 = 40.0;
 /// Room under the foot, in both the column and the rail: a little more than
 /// Ond's 10, so the avatar stays clear of the window's rounded corner on
@@ -38,8 +44,6 @@ pub(super) const FOOT_MARGIN: i8 = 12;
 const FOOTER_BUTTON: f32 = 28.0;
 const RAIL_BUTTON: f32 = 32.0;
 const TOGGLE: f32 = 22.0;
-/// The account menu's width: Ond's server popover's.
-const ACCOUNT_MENU_W: f32 = 250.0;
 
 /// The places to browse, in order: what they're called, where they lead, and
 /// the rail's icon for them.
@@ -127,37 +131,15 @@ impl AccountState {
         }
     }
 
-    /// The small glyph at `c`: a dot, a spinner, or a cloud.
-    fn paint_glyph(&self, ui: &Ui, c: egui::Pos2) {
-        let t = Tokens::of(ui);
+    /// The state as the kit's switcher draws it.
+    fn source_state(&self) -> SourceState {
         match self {
-            Self::Connected => {
-                ui.painter().circle_filled(c, 3.2, t.ok);
-            }
-            Self::Syncing(_) | Self::Connecting => {
-                icons::paint(ui.painter(), Rect::from_center_size(c, vec2(11.0, 11.0)), Icon::Spinner, t.muted);
-                // A sync that stalls, or a connect that hangs, can't hold the
-                // window at 20 frames a second for ever: the spinner stops.
-                let now = ui.input(|i| i.time);
-                let since = ui.data_mut(|d| *d.get_temp_mut_or_insert_with(spinning_since_id(), || now));
-                if now - since < SPIN_SECS {
-                    ui.ctx().request_repaint_after(SPIN_FRAME);
-                }
-            }
-            Self::Offline => icons::paint(ui.painter(), Rect::from_center_size(c, vec2(12.0, 12.0)), Icon::Offline, t.muted),
-        }
-        if !matches!(self, Self::Syncing(_) | Self::Connecting) {
-            ui.data_mut(|d| d.remove::<f64>(spinning_since_id()));
+            Self::Connected => SourceState::Online,
+            Self::Syncing(_) => SourceState::Syncing(None),
+            Self::Connecting => SourceState::Connecting,
+            Self::Offline => SourceState::Offline(OfflineReason::Unreachable),
         }
     }
-}
-
-/// How long the spinner turns before it goes still.
-const SPIN_SECS: f64 = 30.0;
-const SPIN_FRAME: Duration = Duration::from_millis(50);
-
-fn spinning_since_id() -> egui::Id {
-    egui::Id::unique("account-spinning-since")
 }
 
 /// The server's host, without its scheme or path: what the footer names.
@@ -236,7 +218,7 @@ impl ViewCtx<'_> {
             ui.allocate_ui_with_layout(size, egui::Layout::left_to_right(egui::Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = 2.0;
                 let w = (ui.available_width() - 2.0 * (FOOTER_BUTTON + 2.0)).max(40.0);
-                self.account_row(ui, w);
+                self.account_switcher(ui, kit::SwitcherPlace::Foot { width: w });
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     self.settings_button(ui);
                     self.help_button(ui, FOOTER_BUTTON);
@@ -279,7 +261,7 @@ impl ViewCtx<'_> {
         ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
             self.settings_button(ui);
             self.help_button(ui, FOOTER_BUTTON);
-            self.rail_account(ui);
+            self.account_switcher(ui, kit::SwitcherPlace::Rail);
         });
     }
 
@@ -321,121 +303,144 @@ impl ViewCtx<'_> {
         }
     }
 
-    /// The account at the foot of the column: who, and the server's state.
-    /// Click for its menu.
-    fn account_row(&mut self, ui: &mut Ui, width: f32) {
+    /// The account in view: the session's, else the one the scope names,
+    /// else the first.
+    pub(super) fn active_account(&self) -> Option<crate::settings::Account> {
+        self.session
+            .account
+            .clone()
+            .or_else(|| self.scope.single().and_then(|id| self.accounts.iter().find(|a| a.id == id).cloned()))
+            .or_else(|| self.accounts.first().cloned())
+    }
+
+    /// Every account as the switcher and Settings' Sources tab list it: the
+    /// one in view at its live state with that state's line, the others
+    /// signed out or not, under their server's host.
+    pub(super) fn source_entries(&self) -> Vec<SourceEntry> {
+        let Some(account) = self.active_account() else { return Vec::new() };
+        let state = self.account_state();
+        let line = state.line(host(&account.server));
+        let live = || SourceEntry {
+            id: account.id,
+            name: account.display_name().to_owned(),
+            color: account.color,
+            state: state.source_state(),
+            detail: line.clone(),
+            live: true,
+            signed_out: false,
+        };
+        let mut entries: Vec<SourceEntry> = self
+            .accounts
+            .iter()
+            .map(|saved| {
+                if saved.id == account.id {
+                    live()
+                } else {
+                    SourceEntry {
+                        id: saved.id,
+                        name: saved.display_name().to_owned(),
+                        color: saved.color,
+                        state: if saved.signed_out { SourceState::SignedOut } else { SourceState::Online },
+                        detail: host(&saved.server).to_owned(),
+                        live: false,
+                        signed_out: saved.signed_out,
+                    }
+                }
+            })
+            .collect();
+        if !entries.iter().any(|e| e.id == account.id) {
+            entries.push(live());
+        }
+        entries
+    }
+
+    /// The account at the foot of the column, through the kit's source
+    /// switcher: who, and the server's state, in the column (`Some` width)
+    /// or the rail. Click for its menu.
+    fn account_switcher(&mut self, ui: &mut Ui, place: kit::SwitcherPlace) {
         let t = Tokens::of(ui);
-        let Some(account) = self.session.account.clone() else {
-            ui.label(egui::RichText::new("Not signed in").size(12.0).color(t.muted));
+        let Some(account) = self.active_account() else {
+            if matches!(place, kit::SwitcherPlace::Foot { .. }) {
+                ui.label(egui::RichText::new("Not signed in").size(12.0).color(t.muted));
+            }
             return;
         };
         let state = self.account_state();
-        let host = host(&account.server).to_owned();
-        let (rect, resp) = ui.allocate_exact_size(vec2(width, ACCOUNT_H), Sense::click());
-        if ui.is_rect_visible(rect) {
-            let open = egui::Popup::is_id_open(ui.ctx(), egui::Popup::default_response_id(&resp));
-            let fill = if resp.is_pointer_button_down_on() || open {
-                t.selected
-            } else if resp.hovered() {
-                t.hover
-            } else {
-                egui::Color32::TRANSPARENT
-            };
-            ui.painter().rect_filled(rect, 6.0, fill);
-            shell::kit::focus_ring(ui, &resp, rect, 6.0);
-            let avatar = egui::pos2(rect.left() + 8.0 + AVATAR / 2.0, rect.center().y);
-            paint_avatar(ui, avatar, &account.username);
-            let x = avatar.x + AVATAR / 2.0 + 8.0;
-            let room = rect.right() - x - 6.0;
-            let name = crate::widgets::elide(ui, &account.username, FontId::new(12.5, semibold()), t.text, room);
-            let line = crate::widgets::elide(ui, &state.line(&host), FontId::proportional(11.0), t.muted, room - 12.0);
-            let top = rect.center().y - (name.size().y + line.size().y) / 2.0;
-            let line_y = top + name.size().y;
-            ui.painter().galley(pos2(x, top), name, t.text);
-            state.paint_glyph(ui, pos2(x + 4.0, line_y + line.size().y / 2.0));
-            ui.painter().galley(pos2(x + 12.0, line_y), line, t.muted);
+        let tooltip = state.tooltip(host(&account.server));
+        let entries = self.source_entries();
+        let sources: Vec<_> = entries.iter().map(SourceEntry::info).collect();
+        let scope = Scope::only(account.id);
+        // Another account is added beside the one in view, so only once
+        // it's in.
+        let add = self.session.signed_in();
+        let switcher =
+            kit::SourceSwitcher { sources: &sources, scope: &scope, look: kit::SwitcherLook::Card, add, manage: true, toggles: false, tooltip: Some(&tooltip) };
+        let picked = kit::source_switcher(ui, &switcher, place, |ui| self.account_menu(ui, &account, &state));
+        match picked {
+            Some(kit::SourcePick::App(row)) => self.actions.push(match row {
+                AccountRow::SyncNow => Action::SyncNow,
+                AccountRow::Settings => Action::OpenSettings(self.settings),
+                AccountRow::Shortcuts => Action::Shortcuts,
+                AccountRow::SignOut => Action::AskSignOut,
+            }),
+            Some(kit::SourcePick::Source(id)) => self.actions.push(Action::SwitchAccount(id)),
+            Some(kit::SourcePick::Add) => self.actions.push(Action::AddSource),
+            Some(kit::SourcePick::Manage) => self.actions.push(Action::OpenSettings(super::settings_page::Tab::Sources)),
+            // Rede shows one account at a time, and asks for no boxes.
+            Some(kit::SourcePick::All | kit::SourcePick::Toggle(_)) | None => {}
         }
-        let label = format!("{}, {}", account.username, state.line(&host));
-        resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &label));
-        let tip = state.tooltip(&host);
-        let resp = resp.on_hover_text(tip);
-        self.account_menu(&resp, &state);
     }
 
-    /// The rail's account: the avatar, with the state's glyph as a badge, and
-    /// the same menu.
-    fn rail_account(&mut self, ui: &mut Ui) {
-        let Some(account) = self.session.account.clone() else { return };
+    /// The account menu's rows under the switcher: who's signed in and
+    /// where, the server's state, then Sync now, Settings (on the tab it was
+    /// last on), the shortcuts, and Sign out…: Ond's server popover, from
+    /// the kit.
+    fn account_menu(&self, ui: &mut Ui, account: &crate::settings::Account, state: &AccountState) -> Option<AccountRow> {
         let t = Tokens::of(ui);
-        let state = self.account_state();
-        let host = host(&account.server).to_owned();
-        let (rect, resp) = ui.allocate_exact_size(vec2(RAIL_BUTTON, RAIL_BUTTON), Sense::click());
-        if resp.hovered() {
-            ui.painter().rect_filled(rect, 6.0, t.hover);
-        }
-        shell::kit::focus_ring(ui, &resp, rect, 6.0);
-        paint_avatar(ui, rect.center(), &account.username);
-        let badge = rect.center() + vec2(AVATAR / 2.0 - 1.0, AVATAR / 2.0 - 1.0);
-        ui.painter().circle_filled(badge, 5.5, t.sidebar);
-        state.paint_glyph(ui, badge);
-        let label = format!("{}, {}", account.username, state.line(&host));
-        resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &label));
-        let tip = format!("{label}\n{}", state.tooltip(&host));
-        let resp = resp.on_hover_text(tip);
-        self.account_menu(&resp, &state);
-    }
-
-    /// Who's signed in and where, the server's state, then Sync now,
-    /// Settings (on the tab it was last on), the shortcuts, and Sign out…, under
-    /// `resp`: Ond's server popover, from the kit.
-    fn account_menu(&mut self, resp: &egui::Response, state: &AccountState) {
-        let Some(account) = self.session.account.clone() else { return };
-        // Up from the foot of the window, where there's room for it.
-        kit::popover_at(resp, ACCOUNT_MENU_W, egui::RectAlign::TOP_START, |ui| {
-            let t = Tokens::of(ui);
-            kit::padded(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 10.0;
-                    let (r, _) = ui.allocate_exact_size(vec2(AVATAR + 4.0, AVATAR + 4.0), Sense::hover());
-                    paint_avatar(ui, r.center(), &account.username);
-                    ui.vertical(|ui| {
-                        ui.spacing_mut().item_spacing.y = 1.0;
-                        let room = ui.available_width();
-                        let name = crate::widgets::elide(ui, &account.username, FontId::new(13.0, semibold()), t.text, room);
-                        ui.add(egui::Label::new(name).selectable(false));
-                        let server = crate::widgets::elide(ui, &account.server, FontId::proportional(11.0), t.muted, room);
-                        ui.add(egui::Label::new(server).selectable(false));
-                    });
+        let mut picked = None;
+        kit::padded(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 10.0;
+                let (r, _) = ui.allocate_exact_size(vec2(AVATAR + 4.0, AVATAR + 4.0), Sense::hover());
+                paint_avatar(ui, r.center(), &account.username);
+                ui.vertical(|ui| {
+                    ui.spacing_mut().item_spacing.y = 1.0;
+                    let room = ui.available_width();
+                    let name = crate::widgets::elide(ui, &account.username, FontId::new(13.0, semibold()), t.text, room);
+                    ui.add(egui::Label::new(name).selectable(false));
+                    let server = crate::widgets::elide(ui, &account.server, FontId::proportional(11.0), t.muted, room);
+                    ui.add(egui::Label::new(server).selectable(false));
                 });
             });
-            ui.add_space(8.0);
-            let (status, color) = match state {
-                AccountState::Connected => ("Connected".to_owned(), t.text),
-                AccountState::Syncing(label) => (label.clone(), t.text),
-                AccountState::Connecting => ("Connecting…".to_owned(), t.text),
-                AccountState::Offline => ("Can't reach the server · retrying".to_owned(), t.warn),
-            };
-            kit::info_row(ui, "Status", &status, color);
-            let libraries = account.libraries.len();
-            if libraries > 1 {
-                kit::info_row(ui, "Libraries", &libraries.to_string(), t.text);
-            }
-            kit::popover_rule(ui, 6.0);
-            let can_sync = self.session.source.is_some() && !self.sync.running;
-            if can_sync && kit::menu_row(ui, "Sync now") {
-                self.actions.push(Action::SyncNow);
-            }
-            if kit::menu_row(ui, "Settings…") {
-                self.actions.push(Action::OpenSettings(self.settings));
-            }
-            if kit::menu_row(ui, "Keyboard shortcuts") {
-                self.actions.push(Action::Shortcuts);
-            }
-            kit::popover_rule(ui, 6.0);
-            if kit::menu_row(ui, "Sign out…") {
-                self.actions.push(Action::AskSignOut);
-            }
         });
+        ui.add_space(8.0);
+        let (status, color) = match state {
+            AccountState::Connected => ("Connected".to_owned(), t.text),
+            AccountState::Syncing(label) => (label.clone(), t.text),
+            AccountState::Connecting => ("Connecting…".to_owned(), t.text),
+            AccountState::Offline => ("Can't reach the server · retrying".to_owned(), t.warn),
+        };
+        kit::info_row(ui, "Status", &status, color);
+        let libraries = account.libraries.len();
+        if libraries > 1 {
+            kit::info_row(ui, "Libraries", &libraries.to_string(), t.text);
+        }
+        kit::popover_rule(ui, 6.0);
+        let can_sync = self.session.source.is_some() && !self.sync.running;
+        if can_sync && kit::menu_row(ui, "Sync now") {
+            picked = Some(AccountRow::SyncNow);
+        }
+        if kit::menu_row(ui, "Settings…") {
+            picked = Some(AccountRow::Settings);
+        }
+        if kit::menu_row(ui, "Keyboard shortcuts") {
+            picked = Some(AccountRow::Shortcuts);
+        }
+        kit::popover_rule(ui, 6.0);
+        if kit::menu_row(ui, "Sign out…") {
+            picked = Some(AccountRow::SignOut);
+        }
+        picked
     }
 
     /// The gear: Settings, on the tab it was last on.
@@ -456,7 +461,45 @@ impl ViewCtx<'_> {
     }
 }
 
-/// The account's avatar: its initial in a quiet circle.
+/// An account as the switcher and the Sources tab show it.
+pub(super) struct SourceEntry {
+    pub id: accounts::AccountId,
+    pub name: String,
+    pub color: accounts::SourceColor,
+    pub state: SourceState,
+    /// The server's host, or the account in view's live line.
+    pub detail: String,
+    /// The account in view.
+    pub live: bool,
+    pub signed_out: bool,
+}
+
+impl SourceEntry {
+    /// The entry as the kit's widgets take it.
+    pub fn info(&self) -> kit::SourceInfo<'_> {
+        kit::SourceInfo {
+            id: self.id,
+            name: &self.name,
+            kind: "Audiobookshelf",
+            icon: Icon::Headphones,
+            color: self.color,
+            state: &self.state,
+            detail: Some(&self.detail),
+        }
+    }
+}
+
+/// A row of the account menu, as it answers through the switcher.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AccountRow {
+    SyncNow,
+    Settings,
+    Shortcuts,
+    SignOut,
+}
+
+/// The account's avatar in its menu: its initial in a quiet circle, as the
+/// switcher draws it at the foot.
 const AVATAR: f32 = 24.0;
 
 fn paint_avatar(ui: &Ui, c: egui::Pos2, name: &str) {

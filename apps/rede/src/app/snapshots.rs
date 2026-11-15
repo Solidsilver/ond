@@ -52,7 +52,7 @@ fn window(theme: egui::Theme) -> Harness<'static, Option<RedeApp>> {
         .build_ui_state(
             |ui, app: &mut Option<RedeApp>| {
                 let Some(app) = app else { return };
-                whole_window(ui, |ui| if app.login.is_some() { app.login_ui(ui) } else { app.main_ui(ui) });
+                whole_window(ui, |ui| if app.signing_in() { app.login_ui(ui) } else { app.main_ui(ui) });
                 shell::chrome::stand_in_lights(ui.ctx(), (app.mode != crate::window::Mode::Mini).then_some(super::BAR_H));
             },
             None,
@@ -68,9 +68,52 @@ fn scenes(h: &mut Harness<'_, Option<RedeApp>>, s: &Shooter) {
         *h.state_mut() = Some(build());
         s.shoot(h, name);
     }
-    // The sign-in screen, as a first start shows it.
+    // The first-run sheet, as a first start shows it, then its form.
     let dir = tempfile::tempdir().unwrap();
-    scene(h, s, "signin", || signed_out(&ctx, dir.path()));
+    scene(h, s, "signin", || {
+        let mut app = signed_out(&ctx, dir.path());
+        app.onboarding = Some(shell::kit::OnboardingStep::Kinds);
+        app
+    });
+    scene(h, s, "signin-form", || signed_out(&ctx, dir.path()));
+    // Signed in from the sheet: the accounts, Add another and Done. Its own
+    // folder, as for the scenes below that save accounts, so the sign-in
+    // scenes after it stay a first run.
+    let signed = tempfile::tempdir().unwrap();
+    scene(h, s, "signin-added", || {
+        let mut app = super::fixture::app(&ctx, signed.path(), 0);
+        app.onboarding = Some(shell::kit::OnboardingStep::Added);
+        app
+    });
+    // The switcher's Add source…: the form over the account in view, with
+    // Cancel back to it.
+    scene(h, s, "signin-add-source", || {
+        let mut app = super::fixture::app(&ctx, signed.path(), BOOKS.len());
+        app.apply(Action::AddSource);
+        app
+    });
+    // Signed out of sam with alex still signed in: both listed over sam's
+    // form, and Done back to alex. Its own folder, so alex isn't in the
+    // scenes after it.
+    let other = tempfile::tempdir().unwrap();
+    scene(h, s, "signin-another-signed-in", || {
+        let mut app = signed_out(&ctx, other.path());
+        let sam = crate::settings::Account { signed_out: true, ..account() };
+        let alex = crate::settings::Account { color: accounts::SourceColor::new(1), ..crate::settings::Account::new("https://two.example.com", "alex") };
+        app.prefs.edit(|s| s.accounts = vec![sam.clone(), alex]);
+        app.login = Some(LoginForm::for_account(Some(&sam)));
+        app.onboarding = Some(shell::kit::OnboardingStep::Kinds);
+        app
+    });
+    // A saved login that stopped working: the form alone.
+    scene(h, s, "signin-again", || {
+        let mut app = signed_out(&ctx, dir.path());
+        app.onboarding = None;
+        let form = app.login.as_mut().unwrap();
+        (form.server, form.username) = ("https://books.example.com".into(), "sam".into());
+        form.error = Some("Your session has ended. Sign in again.".into());
+        app
+    });
     // Once the server has said how it signs people in: passwords, its
     // provider, both, and waiting on the browser (through Rede's own link, and
     // through Audiobookshelf's when the server hasn't allowed Rede's).
@@ -181,7 +224,7 @@ fn scenes(h: &mut Harness<'_, Option<RedeApp>>, s: &Shooter) {
     // button goes on with the next.
     scene(h, s, "series", || {
         let mut app = app(&ctx, dir.path(), BOOKS.len());
-        let item = sources::ItemKey::new(account().id, "book-0");
+        let item = accounts::ItemKey::new(account().id, "book-0");
         let done = sources::Progress { item, position: sources::Position::from_secs(40_920.0), finished: true, at: Some(std::time::SystemTime::now()) };
         app.positions.insert("book-0".into(), done);
         app.go(book_route(3));
@@ -578,6 +621,50 @@ fn scenes(h: &mut Harness<'_, Option<RedeApp>>, s: &Shooter) {
         }
     }
     h.set_size(egui::vec2(FULL[0], FULL[1]));
+    // Settings › Sources with the account in view syncing; with three
+    // accounts, then with one signed out and the one in view offline, its
+    // row's menu open; and the question before removing one.
+    scene(h, s, "settings-sources-syncing", || {
+        let mut app = app(&ctx, dir.path(), BOOKS.len());
+        playing(&mut app, false);
+        app.sync.running = true;
+        app.sync.applied = 40;
+        app.apply(Action::OpenSettings(super::settings_page::Tab::Sources));
+        app
+    });
+    fn sources(ctx: &egui::Context, dir: &std::path::Path, trouble: bool) -> RedeApp {
+        let mut app = app(ctx, dir, BOOKS.len());
+        playing(&mut app, false);
+        app.sync.synced = Some(std::time::SystemTime::now() - std::time::Duration::from_secs(12 * 60));
+        app.sync.offline = trouble;
+        let office = crate::settings::Account {
+            color: accounts::SourceColor::new(3),
+            name: Some("Office".into()),
+            signed_out: trouble,
+            ..crate::settings::Account::new("https://office.example.com", "alex")
+        };
+        let family = crate::settings::Account { color: accounts::SourceColor::new(5), ..crate::settings::Account::new("https://family.example.org", "kim") };
+        app.prefs.edit(move |s| s.accounts.extend([office, family]));
+        app.apply(Action::OpenSettings(super::settings_page::Tab::Sources));
+        app
+    }
+    // Each in a folder of its own, so the accounts they save don't reach
+    // the scenes after them.
+    let three = tempfile::tempdir().unwrap();
+    scene(h, s, "settings-sources-three", || sources(&ctx, three.path(), false));
+    let trouble = tempfile::tempdir().unwrap();
+    scene(h, s, "settings-sources-trouble", || sources(&ctx, trouble.path(), true));
+    h.get_by_label("Office, Audiobookshelf, Signed out").click();
+    h.run_steps(3);
+    h.event(egui::Event::PointerGone);
+    s.shoot(h, "settings-sources-menu");
+    egui::Popup::close_all(&ctx);
+    scene(h, s, "sheet-remove-source", || {
+        let mut app = sources(&ctx, three.path(), false);
+        let office = app.prefs.get(|p| p.accounts[1].id);
+        app.apply(Action::Source(super::manage::SourceAction::AskRemove(office)));
+        app
+    });
     // Settings › Downloads with the fixture's downloads, and the question
     // before removing them all.
     scene(h, s, "settings-downloads-filled", || {
@@ -896,7 +983,7 @@ fn palette(ctx: &egui::Context, dir: &std::path::Path, query: &str) -> RedeApp {
     let mut app = app(ctx, dir, BOOKS.len());
     playing(&mut app, true);
     in_progress(&mut app);
-    let item = sources::ItemKey::new(account().id, "book-0");
+    let item = accounts::ItemKey::new(account().id, "book-0");
     let yesterday = std::time::SystemTime::now() - std::time::Duration::from_secs(86_400);
     let paused = sources::Progress { item, position: sources::Position::from_secs(14_200.0), finished: false, at: Some(yesterday) };
     app.positions.insert("book-0".into(), paused);

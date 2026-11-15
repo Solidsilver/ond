@@ -6,12 +6,25 @@ use super::{Action, DragTracks, OndApp, PlaylistAction};
 use crate::icons::{self, Icon};
 use crate::nav::{Nav, Route};
 use crate::theme::{Tokens, semibold};
+use accounts::{AccountId, OfflineReason, Scope, SourceColor, SourceState};
 use egui::{FontId, Rect, Sense, Ui, pos2, vec2};
-use shell::kit::info_row;
+use shell::kit::{self, info_row};
+
+/// What a source is called when it hasn't been given a name: a server's
+/// host, a folder source's first folder.
+pub(super) fn default_name(entry: &crate::settings::SourceEntry) -> String {
+    match entry.kind {
+        crate::settings::SourceKind::Subsonic => super::diagnostics::server_host(&entry.server).to_owned(),
+        crate::settings::SourceKind::Local => {
+            entry.folders.first().and_then(|f| f.path.file_name()).map_or_else(|| "Music folder".to_owned(), |n| n.to_string_lossy().into_owned())
+        }
+    }
+}
 
 /// Width of the icon rail (the full sidebar's is the user's, see `layout`).
 pub const RAIL_W: f32 = 52.0;
-/// The footer's buttons (and the server status row's height).
+/// The footer's buttons (and the server switcher's height, in its one-line
+/// look).
 const FOOTER_BUTTON: f32 = 28.0;
 /// The notice that a newer Ond is out.
 const UPDATE_H: f32 = 28.0;
@@ -38,8 +51,12 @@ impl OndApp {
         ui.add_space(18.0);
 
         let active = active_place(&self.ui.nav);
+        let caps = self.session.caps();
         self.section(ui, "Library");
         for (i, (label, route, _)) in PLACES.into_iter().enumerate() {
+            if !place_shown(&route, caps) {
+                continue;
+            }
             let on = active == Some(i);
             let is_offline = route == Route::Offline;
             let resp = self.place(ui, label, on);
@@ -52,6 +69,34 @@ impl OndApp {
             }
         }
         ui.add_space(18.0);
+        let bottom_h = if self.update.is_some() { 34.0 + UPDATE_H + 6.0 } else { 34.0 };
+        if caps.playlists {
+            self.playlists_section(ui, bottom_h);
+        }
+
+        // The footer: the server's state on the left (click for details and
+        // Sign out), keyboard shortcuts and Settings on the right.
+        ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 2.0;
+                let status_w = (ui.available_width() - 2.0 * (FOOTER_BUTTON + 2.0) - 4.0).max(40.0);
+                self.server_switcher(ui, kit::SwitcherPlace::Foot { width: status_w });
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    self.settings_button(ui);
+                    self.help_button(ui);
+                });
+            });
+            if let Some(v) = self.update {
+                ui.add_space(6.0);
+                self.update_notice(ui, v);
+            }
+        });
+    }
+
+    /// "Playlists" with a + for a new one, and the playlists under it, for a
+    /// source that holds them.
+    fn playlists_section(&mut self, ui: &mut Ui, bottom_h: f32) {
+        let t = Tokens::of(ui);
         // "Playlists" with a + for a new one, in line with the section label.
         ui.add_space(2.0);
         ui.horizontal(|ui| {
@@ -65,30 +110,11 @@ impl OndApp {
             });
         });
         ui.add_space(4.0);
-        let bottom_h = if self.update.is_some() { 34.0 + UPDATE_H + 6.0 } else { 34.0 };
         let dragging = egui::DragAndDrop::has_payload_of_type::<DragTracks>(ui.ctx());
         egui::ScrollArea::vertical()
             .id_salt("playlists")
             .max_height((ui.available_height() - bottom_h).max(40.0))
             .show(ui, |ui| self.view().sidebar_playlists(ui, dragging));
-
-        // The footer: the server's state on the left (click for details and
-        // Sign out), keyboard shortcuts and Settings on the right.
-        ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 2.0;
-                let status_w = (ui.available_width() - 2.0 * (FOOTER_BUTTON + 2.0) - 4.0).max(40.0);
-                self.server_status(ui, status_w);
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    self.settings_button(ui);
-                    self.help_button(ui);
-                });
-            });
-            if let Some(v) = self.update {
-                ui.add_space(6.0);
-                self.update_notice(ui, v);
-            }
-        });
     }
 
     /// A newer Ond is out, above the footer: click for Settings › About,
@@ -116,12 +142,16 @@ impl OndApp {
         ui.spacing_mut().item_spacing.y = 4.0;
         let size = vec2(32.0, 32.0);
         let active = active_place(&self.ui.nav);
+        let caps = self.session.caps();
         ui.vertical_centered(|ui| {
             if icons::sized_button(ui, Icon::Search, "Search (⌘K)", size, 14.0, Some(t.muted)).clicked() {
                 self.actions.push(Action::OpenPalette);
             }
             ui.add_space(12.0);
             for (i, (label, route, icon)) in PLACES.into_iter().enumerate() {
+                if !place_shown(&route, caps) {
+                    continue;
+                }
                 let on = active == Some(i);
                 let resp = icons::sized_button(ui, icon, label, size, 15.0, Some(if on { t.text } else { t.muted }));
                 if on {
@@ -131,6 +161,9 @@ impl OndApp {
                 if resp.clicked() {
                     self.actions.push(Action::Go(route));
                 }
+            }
+            if !caps.playlists {
+                return;
             }
             ui.add_space(12.0);
             let lists = icons::sized_button(ui, Icon::List, "Playlists", size, 14.0, Some(t.muted));
@@ -149,66 +182,134 @@ impl OndApp {
         ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
             self.rail_settings_button(ui);
             self.help_button(ui);
-            self.rail_server_status(ui);
+            self.server_switcher(ui, kit::SwitcherPlace::Rail);
         });
     }
 
-    /// The server's state in the footer: a check and the host while connected,
-    /// a ring and progress while syncing, a cloud while offline. Click for the
-    /// details popover (latency, last sync, Sync now, Sign out).
-    fn server_status(&mut self, ui: &mut Ui, width: f32) {
-        let t = Tokens::of(ui);
-        let state = self.server_state();
-        let (rect, resp) = ui.allocate_exact_size(vec2(width, FOOTER_BUTTON), Sense::click());
-        if resp.hovered() {
-            ui.painter().rect_filled(rect, 6.0, t.hover);
+    /// The server in the footer, through the kit's source switcher with
+    /// the one account Ond signs in to: a check and the host while
+    /// connected, a ring and progress while syncing, a cloud while offline,
+    /// or the glyph alone in the rail (the words in a tooltip). Click for
+    /// the details popover (latency, last sync, Sync now, Sign out).
+    fn server_switcher(&mut self, ui: &mut Ui, place: kit::SwitcherPlace) {
+        if self.session.accounts.len() > 1 {
+            return self.all_sources_switcher(ui, place);
         }
-        let glyph = egui::pos2(rect.left() + 12.0, rect.center().y);
-        state.paint_glyph(ui, glyph);
-        let g = crate::widgets::elide(ui, state.label(), FontId::proportional(11.5), t.muted, rect.width() - 30.0);
-        ui.painter().galley(egui::pos2(rect.left() + 24.0, rect.center().y - g.size().y / 2.0), g, t.muted);
-        self.server_popover(&resp, &state);
-        resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, state.tooltip()));
-        resp.on_hover_ui(|ui| {
-            ui.label(state.tooltip());
-        });
-    }
-
-    /// The rail's version: just the glyph, the words in a tooltip; same popover.
-    fn rail_server_status(&mut self, ui: &mut Ui) {
         let state = self.server_state();
-        let (rect, resp) = ui.allocate_exact_size(vec2(32.0, 28.0), Sense::click());
-        if resp.hovered() {
-            ui.painter().rect_filled(rect, 6.0, Tokens::of(ui).hover);
+        let source_state = state.source_state();
+        let id = self.source_id();
+        let (name, color) = self.source_look(&state);
+        let kind = self.session.kind();
+        let sources = [kit::SourceInfo { id, name: &name, kind: kind.name, icon: kind.icon, color, state: &source_state, detail: Some(state.label()) }];
+        let scope = Scope::only(id);
+        let tooltip = state.tooltip(self.session.caps().network);
+        let switcher = kit::SourceSwitcher {
+            sources: &sources,
+            scope: &scope,
+            look: kit::SwitcherLook::Line,
+            add: !self.prefs.managed("sources"),
+            manage: true,
+            toggles: false,
+            tooltip: Some(&tooltip),
+        };
+        let picked = kit::source_switcher(ui, &switcher, place, |ui| self.server_menu(ui, &state));
+        if picked == Some(kit::SourcePick::Manage) {
+            return self.actions.push(Action::OpenSettings(super::settings_page::Section::Sources));
         }
-        state.paint_glyph(ui, rect.center());
-        self.server_popover(&resp, &state);
-        let tip = || format!("{}\n{}", state.label(), state.tooltip());
-        resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, tip()));
-        resp.on_hover_ui(|ui| {
-            ui.label(tip());
+        if picked == Some(kit::SourcePick::Add) {
+            return self.actions.push(Action::Onboarding(kit::OnboardingEvent::AddAnother));
+        }
+        let Some(kit::SourcePick::App(row)) = picked else { return };
+        self.actions.push(match row {
+            ServerRow::MeasureLatency => Action::MeasureLatency,
+            ServerRow::SyncNow => Action::SyncNow,
+            ServerRow::StopSync => Action::StopSync,
+            ServerRow::SignInAgain => Action::SignInAgain,
+            ServerRow::WorkOffline(on) => Action::Offline(super::OfflineAction::WorkOffline(on)),
+            ServerRow::SignOut => Action::AskSignOut,
         });
     }
 
-    fn server_state(&self) -> ServerState {
-        let host = self.session.settings.as_ref().map(|s| super::diagnostics::server_host(&s.server)).unwrap_or_default();
-        if let Some(p) = self.sync.progress {
+    /// The switcher with several sources live: each source with its own
+    /// state, All sources, Add and Manage, then going offline or online for
+    /// every server at once. Hovering it lists what each source is doing.
+    fn all_sources_switcher(&mut self, ui: &mut Ui, place: kit::SwitcherPlace) {
+        use super::source_look::{Detail, describe};
+        let settings = self.prefs.snapshot();
+        let described: Vec<_> = settings.sources.iter().map(|e| describe(e, self.session.get(e.id), self.session.work_offline, Detail::Short)).collect();
+        let sources: Vec<_> = described.iter().map(|d| d.info()).collect();
+        let tooltip = sources.iter().map(|s| format!("{} · {}", s.name, s.line())).collect::<Vec<_>>().join("\n");
+        let switcher = kit::SourceSwitcher {
+            sources: &sources,
+            scope: &self.session.scope,
+            look: kit::SwitcherLook::Line,
+            add: !self.prefs.managed("sources"),
+            manage: true,
+            toggles: true,
+            tooltip: Some(&tooltip),
+        };
+        // Work Offline is one switch for every server; folders aren't touched by it.
+        let servers = described.iter().any(|d| d.kind.capabilities.network);
+        let offline = (servers && !self.prefs.managed("work_offline")).then_some(self.session.work_offline);
+        let pick = kit::source_switcher(ui, &switcher, place, |ui| {
+            let (label, on) = if offline? { ("Go online", false) } else { ("Go offline", true) };
+            menu_item(ui, label).then_some(on)
+        });
+        let action = match pick {
+            Some(kit::SourcePick::Source(account)) => Action::Scope(super::all_sources::ScopeAction::One(account)),
+            Some(kit::SourcePick::All) => Action::Scope(super::all_sources::ScopeAction::All),
+            Some(kit::SourcePick::Manage) => Action::OpenSettings(super::settings_page::Section::Sources),
+            Some(kit::SourcePick::Add) => Action::Onboarding(kit::OnboardingEvent::AddAnother),
+            Some(kit::SourcePick::App(on)) => Action::Offline(super::OfflineAction::WorkOffline(on)),
+            // The menu's boxes are the filter chips by another way in.
+            Some(kit::SourcePick::Toggle(account)) => Action::Scope(super::all_sources::ScopeAction::Chip(kit::SourceChip::Toggle(account))),
+            None => return,
+        };
+        self.actions.push(action);
+    }
+
+    /// The server's account id. Before the first connect has given it one,
+    /// a stand-in that stays put, so a spinner counts from when it started.
+    pub(super) fn source_id(&self) -> AccountId {
+        static NO_ACCOUNT: std::sync::LazyLock<AccountId> = std::sync::LazyLock::new(AccountId::new);
+        self.session.account().unwrap_or(*NO_ACCOUNT)
+    }
+
+    /// What the server is called and its colour: the name it was given in
+    /// the Sources tab, else its host.
+    pub(super) fn source_look(&self, state: &ServerState) -> (String, SourceColor) {
+        let saved = self.session.settings.as_ref();
+        let name = saved.and_then(|s| s.source_name()).map(str::to_owned).unwrap_or_else(|| state.host().to_owned());
+        (name, saved.map_or_else(SourceColor::default, |s| s.source_color()))
+    }
+
+    pub(super) fn server_state(&self) -> ServerState {
+        // A server's host; for a source that isn't one, its default name.
+        let host = self.session.settings.as_ref().and_then(|s| s.primary()).map(default_name).unwrap_or_default();
+        let scans = self.session.kind().scans;
+        if let Some(p) = self.session.sync.progress {
             let fraction = (p.total > 0).then(|| p.done as f32 / p.total as f32);
+            let (done, total) = (crate::fmt::thousands(p.done), crate::fmt::thousands(p.total));
             // Short enough for the footer; the counts are in the tooltip and popover.
             let label = match fraction {
+                _ if scans => format!("Scanning · {done} tracks"),
                 Some(f) => format!("Syncing · {:.0}%", 100.0 * f),
                 None => "Syncing…".to_owned(),
             };
-            let (done, total) = (crate::fmt::thousands(p.done), crate::fmt::thousands(p.total));
             let what = match p.unit {
                 crate::sync::Unit::Tracks => "tracks",
                 crate::sync::Unit::Albums => "albums",
             };
-            let detail = format!("{}\n{done} of {total} {what}", p.label());
-            return ServerState::Syncing { host, label, detail, fraction };
+            let detail =
+                if scans { format!("Scanning the music folder\n{done} of {total} {what}") } else { format!("{}\n{done} of {total} {what}", p.label()) };
+            return ServerState::Syncing { host, label, detail, fraction, scans };
         }
-        if self.session.online && (self.sync.albums || self.sync.tracks) {
-            return ServerState::Syncing { host, label: "Syncing library…".into(), detail: "Fetching the album list".into(), fraction: None };
+        if self.session.online && (self.session.sync.albums || self.session.sync.tracks) {
+            let (label, detail) = if scans { ("Scanning…", "Looking for music") } else { ("Syncing library…", "Fetching the album list") };
+            return ServerState::Syncing { host, label: label.into(), detail: detail.into(), fraction: None, scans };
+        }
+        if !self.session.folder_missing.is_empty() {
+            return ServerState::FolderMissing { host };
         }
         if self.session.online {
             return ServerState::Connected { host };
@@ -225,106 +326,119 @@ impl OndApp {
         ServerState::Connecting { host }
     }
 
-    /// Details about the server, Sync now and Sign out, under `resp`.
-    fn server_popover(&mut self, resp: &egui::Response, state: &ServerState) {
-        egui::Popup::menu(resp).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
-            let t = Tokens::of(ui);
-            ui.set_width(250.0);
-            ui.spacing_mut().item_spacing.y = 0.0;
-            // Opening the popover refreshes the round trip if it's old.
-            if self.session.online && self.diagnostics.latency_stale() {
-                self.actions.push(Action::MeasureLatency);
-            }
-            let (server, user) = self.session.settings.as_ref().map(|s| (s.server.clone(), s.username.clone())).unwrap_or_default();
-            ui.add_space(6.0);
-            ui.horizontal(|ui| {
-                ui.add_space(8.0);
-                ui.label(egui::RichText::new(state.host()).font(FontId::new(13.0, semibold())).color(t.text));
-            });
-            ui.add_space(2.0);
-            ui.horizontal(|ui| {
-                ui.add_space(8.0);
-                ui.add(egui::Label::new(egui::RichText::new(&server).size(11.0).color(t.muted)).truncate());
-            });
-            ui.add_space(10.0);
-            let status = match state {
-                ServerState::Connected { .. } | ServerState::Syncing { .. } => match self.diagnostics.latency() {
-                    Some(rtt) => format!("Connected · {} ms", rtt.as_millis()),
-                    None => "Connected".to_owned(),
-                },
-                ServerState::Offline { .. } => "Can't reach the server · retrying".to_owned(),
-                ServerState::Connecting { .. } => "Connecting…".to_owned(),
-                ServerState::SignIn { .. } => "Sign-in needed".to_owned(),
-                ServerState::WorkingOffline { .. } => "Offline mode".to_owned(),
-            };
-            let status_color = match state {
-                ServerState::Offline { .. } | ServerState::SignIn { .. } => t.warn,
-                _ => t.text,
-            };
-            info_row(ui, "Status", &status, status_color);
-            if let (ServerState::SignIn { .. }, Some(why)) = (state, &self.session.sign_in) {
-                ui.add_space(2.0);
-                ui.horizontal(|ui| {
-                    ui.add_space(8.0);
-                    ui.add(egui::Label::new(egui::RichText::new(why).size(11.0).color(t.muted)).wrap());
-                });
-            }
-            if !user.is_empty() {
-                info_row(ui, "User", &user, t.text);
-            }
-            if !self.session.server_info.is_empty() {
-                info_row(ui, "Server", &self.session.server_info, t.text);
-            }
-            let synced = match state {
-                ServerState::Syncing { detail, .. } => format!("Syncing {}", detail.lines().last().unwrap_or_default()),
-                _ => match self.sync.last {
-                    Some(at) => at.format("%-I:%M %p").to_string(),
-                    None if self.session.client.is_some() => "At launch".to_owned(),
-                    None => "Not yet".to_owned(),
-                },
-            };
-            info_row(ui, "Last sync", &synced, t.text);
-            let action = if self.sync.tracks {
-                Some("Stop sync")
-            } else if self.session.client.is_some() && self.session.online {
-                Some("Sync now")
-            } else {
-                None
-            };
-            if let Some(label) = action {
-                ui.add_space(8.0);
-                ui.horizontal(|ui| {
-                    ui.add_space(8.0);
-                    if crate::widgets::link(ui, label, FontId::proportional(12.0), t.accent).clicked() {
-                        if self.sync.tracks {
-                            self.actions.push(Action::StopSync);
-                        } else {
-                            self.actions.push(Action::SyncNow);
-                            ui.close();
-                        }
-                    }
-                });
-            }
+    /// The switcher's menu: details about the server, Sync now and Sign
+    /// out. What's chosen comes back for the switcher to hand on.
+    fn server_menu(&self, ui: &mut Ui, state: &ServerState) -> Option<ServerRow> {
+        let t = Tokens::of(ui);
+        // Opening the popover refreshes the round trip if it's old.
+        let mut picked = (self.session.online && self.diagnostics.latency_stale()).then_some(ServerRow::MeasureLatency);
+        let caps = self.session.caps();
+        let kind = self.session.kind();
+        let entry = self.session.settings.as_ref().and_then(|s| s.primary());
+        // Under the name: a server's address and user, or a folder source's folders.
+        let (server, user) = match entry {
+            Some(e) if caps.network => (e.server.clone(), e.username.clone()),
+            Some(e) => (e.folders.iter().map(|f| f.path.display().to_string()).collect::<Vec<_>>().join(", "), String::new()),
+            None => Default::default(),
+        };
+        let (title, _) = self.source_look(state);
+        ui.horizontal(|ui| {
             ui.add_space(8.0);
-            ui.separator();
-            ui.add_space(4.0);
-            if matches!(state, ServerState::SignIn { .. }) && menu_item(ui, "Sign in…") {
-                self.actions.push(Action::SignInAgain);
-            }
-            let (label, on) = if self.session.work_offline { ("Go online", false) } else { ("Go offline", true) };
-            if !self.prefs.managed("work_offline") && menu_item(ui, label) {
-                self.actions.push(Action::Offline(super::OfflineAction::WorkOffline(on)));
-            }
-            // Apart from "Go offline", which it sits under: one is undone
-            // with a click, the other with the password.
-            ui.add_space(2.0);
-            ui.separator();
-            ui.add_space(2.0);
-            if menu_item(ui, "Sign out…") {
-                self.actions.push(Action::AskSignOut);
-            }
-            ui.add_space(2.0);
+            ui.label(egui::RichText::new(title).font(FontId::new(13.0, semibold())).color(t.text));
         });
+        ui.add_space(2.0);
+        ui.horizontal(|ui| {
+            ui.add_space(8.0);
+            ui.add(egui::Label::new(egui::RichText::new(&server).size(11.0).color(t.muted)).truncate());
+        });
+        ui.add_space(10.0);
+        let status = match state {
+            ServerState::Connected { .. } | ServerState::Syncing { .. } if !caps.network => "Ready".to_owned(),
+            ServerState::Connected { .. } | ServerState::Syncing { .. } => match self.diagnostics.latency() {
+                Some(rtt) => format!("Connected · {} ms", rtt.as_millis()),
+                None => "Connected".to_owned(),
+            },
+            ServerState::Offline { .. } => "Can't reach the server · retrying".to_owned(),
+            ServerState::FolderMissing { .. } => "Folder missing".to_owned(),
+            ServerState::Connecting { .. } => "Connecting…".to_owned(),
+            ServerState::SignIn { .. } => "Sign-in needed".to_owned(),
+            ServerState::WorkingOffline { .. } => "Offline mode".to_owned(),
+        };
+        let status_color = match state {
+            ServerState::Offline { .. } | ServerState::FolderMissing { .. } | ServerState::SignIn { .. } => t.warn,
+            _ => t.text,
+        };
+        info_row(ui, "Status", &status, status_color);
+        if let (ServerState::SignIn { .. }, Some(why)) = (state, &self.session.sign_in) {
+            ui.add_space(2.0);
+            ui.horizontal(|ui| {
+                ui.add_space(8.0);
+                ui.add(egui::Label::new(egui::RichText::new(why).size(11.0).color(t.muted)).wrap());
+            });
+        }
+        if !user.is_empty() {
+            info_row(ui, "User", &user, t.text);
+        }
+        if !self.session.server_info.is_empty() && caps.network {
+            info_row(ui, "Server", &self.session.server_info, t.text);
+        }
+        let synced = match state {
+            ServerState::Syncing { detail, scans, .. } => {
+                format!("{} {}", if *scans { "Scanning" } else { "Syncing" }, detail.lines().last().unwrap_or_default())
+            }
+            _ => match self.session.sync.last {
+                Some(at) => at.format("%-I:%M %p").to_string(),
+                None if self.session.source.is_some() => "At launch".to_owned(),
+                None => "Not yet".to_owned(),
+            },
+        };
+        info_row(ui, if kind.scans { "Last scan" } else { "Last sync" }, &synced, t.text);
+        let action = if self.session.sync.tracks {
+            Some(if kind.scans { "Stop scan" } else { "Stop sync" })
+        } else if self.session.source.is_some() && self.session.online {
+            Some(kind.sync)
+        } else {
+            None
+        };
+        if let Some(label) = action {
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                ui.add_space(8.0);
+                if crate::widgets::link(ui, label, FontId::proportional(12.0), t.accent).clicked() {
+                    if self.session.sync.tracks {
+                        picked = Some(ServerRow::StopSync);
+                    } else {
+                        picked = Some(ServerRow::SyncNow);
+                        ui.close();
+                    }
+                }
+            });
+        }
+        ui.add_space(8.0);
+        ui.separator();
+        ui.add_space(4.0);
+        if matches!(state, ServerState::SignIn { .. }) && menu_item(ui, "Sign in…") {
+            picked = Some(ServerRow::SignInAgain);
+        }
+        // A folder on this computer has no connection to drop and no
+        // sign-in: neither row is offered for it.
+        if !caps.network {
+            ui.add_space(4.0);
+            return picked;
+        }
+        let (label, on) = if self.session.work_offline { ("Go online", false) } else { ("Go offline", true) };
+        if !self.prefs.managed("work_offline") && menu_item(ui, label) {
+            picked = Some(ServerRow::WorkOffline(on));
+        }
+        // Apart from "Go offline", which it sits under: one is undone
+        // with a click, the other with the password.
+        ui.add_space(2.0);
+        ui.separator();
+        ui.add_space(2.0);
+        if menu_item(ui, "Sign out…") {
+            picked = Some(ServerRow::SignOut);
+        }
+        picked
     }
 
     /// The gear: opens Settings.
@@ -401,8 +515,9 @@ impl ViewCtx<'_> {
         };
         for (i, p) in data.playlists.iter().enumerate() {
             let mine = owns(self.session, p);
-            // Downloaded (or on its way): the same mark as on album cards.
-            let mark = super::offline_page::pin_mark(self.downloads.snap.pin(&offline::Pin::Playlist(p.id.clone())));
+            // Downloaded (or on its way): only when the source downloads.
+            let mark =
+                self.session.caps().downloads.then(|| super::offline_page::pin_mark(self.downloads.snap.pin(&offline::Pin::Playlist(p.id.clone())))).flatten();
             let resp = place(ui, &p.name, active == Some(i), mark);
             // A drop target for songs dragged from any list.
             if mine && dragging {
@@ -421,13 +536,30 @@ impl ViewCtx<'_> {
             }
             resp.context_menu(|ui| {
                 let kept = self.downloads.snap.pin(&offline::Pin::Playlist(p.id.clone())).is_some();
-                super::browse::collection_menu(ui, &super::browse::Collection::Playlist(p.id.clone()), true, kept, None, self.actions);
+                super::browse::collection_menu(
+                    ui,
+                    &super::browse::Collection::Playlist(p.id.clone()),
+                    true,
+                    self.session.caps().downloads.then_some(kept),
+                    None,
+                    self.actions,
+                );
                 if mine {
                     ui.separator();
                     self.playlist_edit_items(ui, &p.id, &p.name);
                 }
             });
         }
+    }
+}
+
+/// Whether a source that can do `caps` has anything at `route`: Favorites
+/// for one that holds hearts, Offline for one whose music downloads.
+pub(super) fn place_shown(route: &Route, caps: crate::source::Capabilities) -> bool {
+    match route {
+        Route::Favorites => caps.stars,
+        Route::Offline => caps.downloads,
+        _ => true,
     }
 }
 
@@ -447,9 +579,13 @@ fn active_place(nav: &Nav) -> Option<usize> {
 }
 
 /// Playlists the user can change (others' public ones are read-only).
-pub(super) fn owns(session: &super::Session, p: &subsonic::Playlist) -> bool {
-    match (&p.owner, &session.client) {
-        (Some(owner), Some(c)) => owner == c.username(),
+pub(super) fn owns(session: &super::Session, p: &crate::source::Playlist) -> bool {
+    if p.id.starts_with("ond:") {
+        return true;
+    }
+    let session = session.for_item(&p.id);
+    match (&p.owner, &session.source, &session.settings) {
+        (Some(owner), Some(_), Some(settings)) => owner == settings.username(),
         _ => true,
     }
 }
@@ -481,7 +617,7 @@ fn menu_item(ui: &mut Ui, label: &str) -> bool {
 
 /// The server's state as the footer shows it.
 #[derive(Debug, Clone, PartialEq)]
-enum ServerState {
+pub(super) enum ServerState {
     Connected {
         host: String,
     },
@@ -490,6 +626,8 @@ enum ServerState {
         label: String,
         detail: String,
         fraction: Option<f32>,
+        /// A scan of folders on this computer, not a server's sync.
+        scans: bool,
     },
     /// Not answering; reconnecting in the background.
     Offline {
@@ -507,14 +645,19 @@ enum ServerState {
     WorkingOffline {
         host: String,
     },
+    /// A configured local folder is missing or unreadable.
+    FolderMissing {
+        host: String,
+    },
 }
 
 impl ServerState {
-    fn host(&self) -> &str {
+    pub(super) fn host(&self) -> &str {
         match self {
             ServerState::Connected { host }
             | ServerState::Syncing { host, .. }
             | ServerState::Offline { host }
+            | ServerState::FolderMissing { host }
             | ServerState::Connecting { host }
             | ServerState::SignIn { host }
             | ServerState::WorkingOffline { host } => host,
@@ -522,22 +665,25 @@ impl ServerState {
     }
 
     /// What the footer says.
-    fn label(&self) -> &str {
+    pub(super) fn label(&self) -> &str {
         match self {
             ServerState::Connected { host } => host,
             ServerState::Syncing { label, .. } => label,
             ServerState::Offline { .. } => "Can't reach the server",
+            ServerState::FolderMissing { .. } => "Folder missing",
             ServerState::Connecting { .. } => "Connecting…",
             ServerState::SignIn { .. } => "Sign in again",
             ServerState::WorkingOffline { .. } => "Offline mode",
         }
     }
 
-    fn tooltip(&self) -> String {
+    fn tooltip(&self, network: bool) -> String {
         match self {
+            ServerState::Connected { host } if !network => format!("{host}: music on this computer. Click for details."),
             ServerState::Connected { host } => format!("Connected to {host}. Click for details."),
             ServerState::Syncing { detail, .. } => format!("{detail}\nYou can browse while it runs. New albums and tracks appear as they arrive."),
             ServerState::Offline { .. } => "Can't reach the server. Downloaded music still plays, and Ond keeps trying to reconnect.".into(),
+            ServerState::FolderMissing { .. } => "A configured music folder is missing or unreadable. Existing albums stay in your library.".into(),
             ServerState::Connecting { host } => format!("Connecting to {host}…"),
             ServerState::SignIn { .. } => "The server didn't accept the saved login. Downloaded music still plays. Click to sign in.".into(),
             ServerState::WorkingOffline { .. } => {
@@ -546,61 +692,29 @@ impl ServerState {
         }
     }
 
-    /// The small glyph at `c`: a check, a progress ring or spinner, or a cloud.
-    fn paint_glyph(&self, ui: &Ui, c: egui::Pos2) {
-        let t = Tokens::of(ui);
-        let painter = ui.painter();
+    /// The state as the kit's switcher draws it.
+    pub(super) fn source_state(&self) -> SourceState {
         match self {
-            ServerState::Connected { .. } => icons::status_mark(painter, c, 3.4, icons::Status::Good, None),
-            ServerState::Syncing { fraction: Some(f), .. } => icons::progress_ring(painter, c, 5.5, *f, t.accent, t.hairline),
-            ServerState::Syncing { fraction: None, .. } => {
-                icons::paint(painter, Rect::from_center_size(c, vec2(12.0, 12.0)), Icon::Spinner, t.muted);
-                // A sync with no progress to report can stall for good; the
-                // spinner stops rather than holding the window at 20 fps.
-                let now = ui.input(|i| i.time);
-                let since = ui.data_mut(|d| *d.get_temp_mut_or_insert_with(syncing_since_id(), || now));
-                if now - since < SYNC_SPIN_SECS {
-                    ui.ctx().request_repaint_after(SPIN);
-                }
-            }
-            ServerState::Connecting { .. } => {
-                icons::paint(painter, Rect::from_center_size(c, vec2(12.0, 12.0)), Icon::Spinner, t.muted);
-                // A connect that hangs past its timeout shouldn't keep the
-                // window drawing 20 times a second: the spinner stops.
-                let now = ui.input(|i| i.time);
-                let since = ui.data_mut(|d| *d.get_temp_mut_or_insert_with(connecting_since_id(), || now));
-                if now - since < CONNECT_SPIN_SECS {
-                    ui.ctx().request_repaint_after(SPIN);
-                }
-            }
-            ServerState::Offline { .. } | ServerState::WorkingOffline { .. } => {
-                icons::paint(painter, Rect::from_center_size(c, vec2(13.0, 13.0)), Icon::Offline, t.muted)
-            }
-            ServerState::SignIn { .. } => super::offline_page::mark(ui, c, 12.0, super::offline_page::Mark::Failed),
-        }
-        if !matches!(self, ServerState::Connecting { .. }) {
-            ui.data_mut(|d| d.remove::<f64>(connecting_since_id()));
-        }
-        if !matches!(self, ServerState::Syncing { fraction: None, .. }) {
-            ui.data_mut(|d| d.remove::<f64>(syncing_since_id()));
+            ServerState::Connected { .. } => SourceState::Online,
+            ServerState::Syncing { scans: true, .. } => SourceState::Scanning,
+            ServerState::Syncing { fraction, .. } => SourceState::Syncing(*fraction),
+            ServerState::Offline { .. } => SourceState::Offline(OfflineReason::Unreachable),
+            ServerState::FolderMissing { .. } => SourceState::FolderMissing,
+            ServerState::Connecting { .. } => SourceState::Connecting,
+            ServerState::SignIn { .. } => SourceState::SignedOut,
+            ServerState::WorkingOffline { .. } => SourceState::Offline(OfflineReason::ByChoice),
         }
     }
 }
 
-/// The spinner's frame interval.
-const SPIN: std::time::Duration = std::time::Duration::from_millis(50);
-/// How long the Connecting spinner turns (the ping gives up after 10 s).
-const CONNECT_SPIN_SECS: f64 = 15.0;
-
-/// How long the indeterminate Syncing spinner turns before it goes still.
-const SYNC_SPIN_SECS: f64 = 30.0;
-
-/// When the footer started showing an indeterminate Syncing.
-fn syncing_since_id() -> egui::Id {
-    egui::Id::unique("server-syncing-since")
-}
-
-/// When the footer started showing Connecting.
-fn connecting_since_id() -> egui::Id {
-    egui::Id::unique("server-connecting-since")
+/// A row of the server menu, as it answers through the switcher.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ServerRow {
+    /// Not a row: the menu opened with an old round trip to refresh.
+    MeasureLatency,
+    SyncNow,
+    StopSync,
+    SignInAgain,
+    WorkOffline(bool),
+    SignOut,
 }

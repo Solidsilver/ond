@@ -9,6 +9,7 @@ use super::{Action, AlbumSort, Data, Keep, OndApp, PrefsAction, QueueAction};
 use crate::icons::{self, Icon};
 use crate::nav::{FilterKind, Route};
 use crate::settings::ViewMode;
+use crate::source::identity;
 use crate::theme::{Tokens, semibold};
 use crate::widgets::{choice, elide, view_picker};
 use egui::{FontId, Rect, Sense, Ui, pos2, vec2};
@@ -21,7 +22,7 @@ pub(super) const GAP_Y: f32 = 24.0;
 /// Title + artist lines under the art.
 pub(super) const LABEL_H: f32 = 40.0;
 /// The photo beside an artist page's name.
-const ARTIST_PHOTO: f32 = 96.0;
+pub(super) const ARTIST_PHOTO: f32 = 96.0;
 
 /// Short name for a place, for breadcrumbs.
 pub fn route_label(route: &Route, data: &Data) -> String {
@@ -30,6 +31,7 @@ pub fn route_label(route: &Route, data: &Data) -> String {
         Route::Albums => "Albums".into(),
         Route::Artists => "Artists".into(),
         Route::Songs => "Songs".into(),
+        Route::Playlists => "Playlists".into(),
         Route::Favorites => "Favorites".into(),
         Route::Offline => "Offline".into(),
         Route::Artist { name, .. } => name.clone(),
@@ -56,7 +58,7 @@ pub fn grid_ids(route: &Route, sort: AlbumSort, descending: bool, data: &Data) -
             return ids;
         }
         Route::Albums => (0..albums.len()).collect(),
-        Route::Artist { name, id } => (0..albums.len()).filter(|&i| albums[i].has_artist(id.as_deref(), name)).collect(),
+        Route::Artist { name, id } => (0..albums.len()).filter(|&i| data.artist_has_album(&albums[i], id.as_deref(), name)).collect(),
         Route::Filter { kind, value } => (0..albums.len())
             .filter(|&i| {
                 let a = &albums[i];
@@ -95,6 +97,7 @@ impl OndApp {
             Route::Recent | Route::Albums | Route::Filter { .. } => self.albums_place(ui, &route),
             Route::Artists => self.view().artists_page(ui),
             Route::Songs => self.view().songs_page(ui),
+            Route::Playlists => self.view().playlists_page(ui),
             Route::Artist { name, .. } => self.artist_page(ui, &route, name),
             Route::Album(id) => self.view().album_page(ui, id),
             Route::Playlist { id, name } => self.view().playlist_page(ui, id, name),
@@ -125,6 +128,9 @@ impl OndApp {
         let sort = (*route == Route::Albums && view == ViewMode::Grid).then_some((&AlbumSort::ALL[..], &mut self.ui.sort));
         if heading_bar(ui, &title, sub, Some(&mut view), sort, |s| s.label().into()) {
             self.ui.sort_desc = false;
+        }
+        if matches!(route, Route::Albums | Route::Recent) {
+            self.view().scope_chips(ui);
         }
         if view != self.ui.prefs.album_view {
             self.actions.push(Action::Prefs(PrefsAction::AlbumView(view)));
@@ -162,51 +168,69 @@ impl OndApp {
             _ => None,
         };
         // Their photo, else their albums' covers or initials, as in Artists.
-        let entry =
-            self.ui.prefs.artist_photos.then(|| self.search.index.as_ref()?.artist(id, name).map(|a| (a.cover.clone(), a.album_covers.clone()))).flatten();
+        let (photos, albums) = match self.search.index.as_ref().filter(|_| self.ui.prefs.artist_photos) {
+            Some(index) => {
+                let (photos, albums) = super::artists::faces(index, &self.data, id, name);
+                (photos.into_iter().map(str::to_owned).collect(), albums)
+            }
+            None => (Vec::new(), Vec::new()),
+        };
         ui.horizontal(|ui| {
             if self.ui.prefs.artist_photos {
-                let (photo, albums) = entry.unwrap_or_default();
+                let photos: Vec<&str> = photos.iter().map(String::as_str).collect();
                 let (rect, _) = ui.allocate_exact_size(vec2(ARTIST_PHOTO, ARTIST_PHOTO), Sense::hover());
-                super::artists::avatar(&mut self.art, ui, rect, photo.as_deref(), name, &albums);
+                super::artists::avatar(&mut self.art, ui, rect, &photos, name, &albums);
                 ui.add_space(14.0);
             }
             ui.vertical(|ui| self.artist_header(ui, route, name, sub, !own.is_empty()));
         });
         ui.add_space(14.0);
         if own.is_empty() && credited.is_empty() {
-            let (title, body) = if self.sync.tracks { ("Nothing yet", "Credits fill in while tracks sync.") } else { ("No albums credit this name", "") };
+            let (title, body) =
+                if self.session.sync.tracks { ("Nothing yet", "Credits fill in while tracks sync.") } else { ("No albums credit this name", "") };
             crate::widgets::empty_state(ui, Icon::Disc, title, body);
             return;
         }
         let (cols, tile) = grid_metrics(ui.available_width());
         let row_h = tile + LABEL_H + GAP_Y;
-        // Two grids with a heading between: lines of two heights, so the
-        // virtual list's variable-height layout rather than its grid.
-        let (own_rows, credited_rows) = (own.len().div_ceil(cols), credited.len().div_ceil(cols));
-        let head = if credited_rows > 0 { 1 } else { 0 };
-        let mut heights = vec![row_h; own_rows + head + credited_rows];
-        if head > 0 {
-            heights[own_rows] = CREDITED_HEAD_H;
+        // Grids with headings between (each source's part of a merged
+        // artist, then the albums crediting them): lines of two heights, so
+        // the virtual list's variable-height layout rather than its grid.
+        let mut lines = Vec::new();
+        let groups = self.artist_groups(route, name, &own);
+        for (mark, albums) in &groups {
+            if let Some(mark) = mark {
+                lines.push(ArtistLine::Source(mark.color, mark.name.clone()));
+            }
+            lines.extend(albums.chunks(cols).map(|row| ArtistLine::Albums(row.to_vec())));
         }
+        if !credited.is_empty() {
+            lines.push(ArtistLine::Credited);
+            lines.extend(credited.chunks(cols).map(|row| ArtistLine::Albums(row.to_vec())));
+        }
+        let heights: Vec<f32> = lines.iter().map(|l| if matches!(l, ArtistLine::Albums(_)) { row_h } else { CREDITED_HEAD_H }).collect();
         super::layout::into_gutter(ui, |ui| {
             egui::ScrollArea::vertical().id_salt(("artist", name)).auto_shrink(false).content_margin(super::layout::gutter()).show_viewport(
                 ui,
                 |ui, viewport| {
                     ui.spacing_mut().item_spacing.y = 0.0;
                     super::virtual_list::visible_lines(ui, viewport, &heights, |ui, k| {
-                        ui.push_id(k, |ui| {
-                            if k < own_rows {
-                                self.view().grid_row(ui, &own[k * cols..((k + 1) * cols).min(own.len())], tile);
-                            } else if k == own_rows && head > 0 {
+                        ui.push_id(k, |ui| match &lines[k] {
+                            ArtistLine::Albums(row) => self.view().grid_row(ui, row, tile),
+                            head => {
                                 ui.allocate_ui_with_layout(vec2(ui.available_width(), CREDITED_HEAD_H), egui::Layout::top_down(egui::Align::Min), |ui| {
                                     ui.set_min_height(CREDITED_HEAD_H);
                                     ui.add_space(6.0);
-                                    ui.label(egui::RichText::new("Also credited on").font(FontId::new(15.0, semibold())).color(t.text));
+                                    let font = FontId::new(15.0, semibold());
+                                    match head {
+                                        ArtistLine::Source(color, name) => {
+                                            shell::kit::source_label(ui, *color, name, font, t.text);
+                                        }
+                                        _ => {
+                                            ui.label(egui::RichText::new("Also credited on").font(font).color(t.text));
+                                        }
+                                    }
                                 });
-                            } else {
-                                let r = k - own_rows - head;
-                                self.view().grid_row(ui, &credited[r * cols..((r + 1) * cols).min(credited.len())], tile);
                             }
                         });
                     });
@@ -215,18 +239,58 @@ impl OndApp {
         });
     }
 
+    /// An artist's own albums, split by source under each source's dot and
+    /// name when they're a merged artist with albums from more than one
+    /// (so two artists merged wrongly by name show apart); else one group
+    /// without a heading. Groups follow the sources' order.
+    fn artist_groups(&self, route: &Route, name: &str, own: &[usize]) -> Vec<(Option<super::source_look::Mark>, Vec<usize>)> {
+        let id = match route {
+            Route::Artist { id, .. } => id.as_deref(),
+            _ => None,
+        };
+        let spans = self.data.merged_artist(id, name).is_some_and(|m| m.albums.len() > 1);
+        if !spans || !super::source_look::mixed(&self.session) {
+            return vec![(None, own.to_vec())];
+        }
+        let marks = &self.ui.prefs.sources;
+        let mut groups: Vec<(Option<super::source_look::Mark>, Vec<usize>)> = marks
+            .iter()
+            .map(|m| {
+                let albums = own.iter().copied().filter(|&i| identity::account(&self.data.albums[i].id) == Some(m.id)).collect();
+                (Some(m.clone()), albums)
+            })
+            .collect();
+        groups.retain(|(_, albums): &(_, Vec<usize>)| !albums.is_empty());
+        // Anything without a known source stays on the page, last.
+        let placed: usize = groups.iter().map(|(_, a)| a.len()).sum();
+        if placed < own.len() {
+            let rest = own.iter().copied().filter(|&i| identity::account(&self.data.albums[i].id).is_none_or(|a| marks.get(a).is_none())).collect();
+            groups.push((None, rest));
+        }
+        if groups.len() < 2 {
+            return vec![(None, own.to_vec())];
+        }
+        groups
+    }
+
     /// The artist's name and album count, and (when they have albums) the
     /// buttons to play them and love them.
     fn artist_header(&mut self, ui: &mut Ui, route: &Route, name: &str, sub: Option<String>, albums: bool) {
+        let id = match route {
+            Route::Artist { id, .. } => id.clone(),
+            _ => None,
+        };
         self.view().heading(ui, name, sub);
         if albums {
             ui.horizontal(|ui| {
                 // Play takes their albums in the page's order; Shuffle mixes them.
                 if let Some(a) = play_shuffle(ui) {
-                    self.actions.push(Action::Artist(name.to_owned(), a));
+                    self.actions.push(Action::Artist(name.to_owned(), id.clone(), a));
                 }
                 // Only artists the server knows by id can be loved.
-                if let Route::Artist { id: Some(id), .. } = route {
+                if let Route::Artist { id: Some(id), .. } = route
+                    && self.session.caps().stars
+                {
                     let loved = self.favorites.is_on(crate::favorites::StarKind::Artist, id);
                     if crate::widgets::heart_button(ui, loved, 30.0, 14.0).clicked() {
                         self.actions.push(Action::ToggleStar {
@@ -238,7 +302,7 @@ impl OndApp {
                     }
                 }
                 let more = icons::sized_button(ui, Icon::More, "More", vec2(30.0, 30.0), 13.0, Some(Tokens::of(ui).accent));
-                egui::Popup::menu(&more).show(|ui| collection_menu(ui, &Collection::Artist(name.to_owned()), false, false, None, &mut self.actions));
+                egui::Popup::menu(&more).show(|ui| collection_menu(ui, &Collection::Artist(name.to_owned(), id.clone()), false, None, None, &mut self.actions));
             });
         }
     }
@@ -275,16 +339,27 @@ pub(super) fn heading_bar<T: Copy + PartialEq>(
     changed
 }
 
-/// The "Also credited on" line between an artist's own albums and the rest.
+/// The "Also credited on" line between an artist's own albums and the
+/// rest, and a source's heading over its part of a merged artist's.
 const CREDITED_HEAD_H: f32 = 34.0;
+
+/// A line of an artist's page.
+enum ArtistLine {
+    /// One source's albums follow.
+    Source(accounts::SourceColor, String),
+    /// The albums crediting the artist follow.
+    Credited,
+    /// A row of tiles.
+    Albums(Vec<usize>),
+}
 
 /// The artist page's memo key for the albums crediting them: the grid's own
 /// route and library version, and a hash of the credited ids, which arrive
 /// without bumping the version.
-pub(super) type CreditedKey = (Route, u64, u64);
+pub(super) type CreditedKey = (Route, u64, u64, u64);
 
 /// The albums that credit `name` and aren't among their `own`, built once
-/// per route, library version and credit list.
+/// per route, library version, artists version and credit list.
 fn credited_albums(memo: &mut crate::memo::Memo<CreditedKey, Vec<usize>>, route: &Route, name: &str, own: &[usize], data: &Data) -> Arc<Vec<usize>> {
     let ids = data.credited.get(name);
     let hash = {
@@ -293,9 +368,19 @@ fn credited_albums(memo: &mut crate::memo::Memo<CreditedKey, Vec<usize>>, route:
         ids.hash(&mut h);
         h.finish()
     };
-    memo.get((route.clone(), data.version, hash), || {
+    let route_id = match route {
+        Route::Artist { id, .. } => id.as_deref(),
+        _ => None,
+    };
+    memo.get((route.clone(), data.version, data.artists_version, hash), || {
         let own_ids: std::collections::HashSet<&str> = own.iter().map(|&i| data.albums[i].id.as_str()).collect();
-        ids.map(|ids| ids.iter().filter(|id| !own_ids.contains(id.as_str())).filter_map(|id| data.by_id.get(id).copied()).collect()).unwrap_or_default()
+        ids.map(|ids| {
+            ids.iter()
+                .filter(|id| !own_ids.contains(id.as_str()) && !data.is_other_homonym_album(route_id, name, id))
+                .filter_map(|id| data.by_id.get(id).copied())
+                .collect()
+        })
+        .unwrap_or_default()
     })
 }
 
@@ -311,7 +396,7 @@ pub fn grid_metrics(width: f32) -> (usize, f32) {
 pub enum Collection {
     Album(String),
     Playlist(String),
-    Artist(String),
+    Artist(String, Option<String>),
 }
 
 impl Collection {
@@ -319,7 +404,7 @@ impl Collection {
         match self {
             Collection::Album(id) => Action::Album(id.clone(), a),
             Collection::Playlist(id) => Action::Playlist(id.clone(), a),
-            Collection::Artist(name) => Action::Artist(name.clone(), a),
+            Collection::Artist(name, id) => Action::Artist(name.clone(), id.clone(), a),
         }
     }
 
@@ -328,20 +413,22 @@ impl Collection {
         match self {
             Collection::Album(id) => Some(Keep::Album(id.clone())),
             Collection::Playlist(id) => Some(Keep::Playlist(id.clone())),
-            Collection::Artist(_) => None,
+            Collection::Artist(..) => None,
         }
     }
 }
 
 /// The same queue and download items wherever a collection has a menu. With
 /// `play` the menu leads with Play and Shuffle (context menus); header menus
-/// skip them, having those buttons beside. `shortcut` labels the download item.
-pub fn collection_menu(ui: &mut Ui, c: &Collection, play: bool, kept: bool, shortcut: Option<&str>, actions: &mut Vec<Action>) {
+/// skip them, having those buttons beside. `kept` says whether it's
+/// downloaded, `None` for a source whose music doesn't download (no item);
+/// `shortcut` labels the download item.
+pub fn collection_menu(ui: &mut Ui, c: &Collection, play: bool, kept: Option<bool>, shortcut: Option<&str>, actions: &mut Vec<Action>) {
     let mut items = Vec::new();
     if play {
         match c {
             // An artist's menu offers the shuffle across their albums.
-            Collection::Artist(_) => items.push(("Shuffle all", QueueAction::Shuffle)),
+            Collection::Artist(..) => items.push(("Shuffle all", QueueAction::Shuffle)),
             _ => items.extend([("Play", QueueAction::Play { start: 0 }), ("Shuffle", QueueAction::Shuffle)]),
         }
     }
@@ -351,7 +438,7 @@ pub fn collection_menu(ui: &mut Ui, c: &Collection, play: bool, kept: bool, shor
             actions.push(c.action(action));
         }
     }
-    if let Some(keep) = c.keep() {
+    if let (Some(keep), Some(kept)) = (c.keep(), kept) {
         ui.separator();
         offline_item(ui, kept, shortcut, || keep, actions);
     }
@@ -391,7 +478,8 @@ impl ViewCtx<'_> {
 
     pub(super) fn cached_grid(&mut self, route: &Route) -> Arc<Vec<usize>> {
         let (sort, desc, data) = (self.ui.sort, self.ui.sort_desc, &self.data);
-        self.ui.grid.get((route.clone(), sort, desc, data.version), || grid_ids(route, sort, desc, data))
+        let artists_version = if matches!(route, Route::Artist { .. }) { data.artists_version } else { 0 };
+        self.ui.grid.get((route.clone(), sort, desc, data.version, artists_version), || grid_ids(route, sort, desc, data))
     }
 
     /// A full-height, virtualized grid: only visible rows are laid out, so only
@@ -482,8 +570,19 @@ impl ViewCtx<'_> {
             let mark_w = if mark.is_some() { 16.0 } else { 0.0 };
             let title = elide(ui, &album.name, FontId::proportional(13.0), t.text, tile);
             ui.painter().galley(pos2(rect.left(), art.bottom() + 7.0), title, t.text);
-            let sub = elide(ui, album.artist.as_deref().unwrap_or_default(), FontId::proportional(12.0), t.muted, tile - mark_w);
-            ui.painter().galley(pos2(rect.left(), art.bottom() + 24.0), sub, t.muted);
+            // Where it comes from follows the artist, while sources are
+            // mixed, so the artist starts under the title: a dot for each
+            // source with a copy.
+            let artist = album.artist.as_deref().unwrap_or_default();
+            let sub_top = art.bottom() + 24.0;
+            let dots = self.album_dots(id);
+            if dots.is_empty() {
+                let sub = elide(ui, artist, FontId::proportional(12.0), t.muted, tile - mark_w);
+                ui.painter().galley(pos2(rect.left(), sub_top), sub, t.muted);
+            } else {
+                let line = (artist, FontId::proportional(12.0), t.muted);
+                shell::kit::text_then_dots(ui, pos2(rect.left(), sub_top), line, tile - mark_w, &dots, t.bg);
+            }
             if let Some(m) = mark {
                 super::offline_page::mark(ui, pos2(rect.right() - 6.0, art.bottom() + 31.0), 11.0, m);
             }
@@ -505,12 +604,37 @@ impl ViewCtx<'_> {
 
     /// An album's right-click menu, on its tile or its row.
     pub(super) fn album_menu(&mut self, ui: &mut Ui, album: &library::Album, kept: bool) {
-        collection_menu(ui, &Collection::Album(album.id.clone()), true, kept, None, self.actions);
+        collection_menu(ui, &Collection::Album(album.id.clone()), true, self.session.caps().downloads.then_some(kept), None, self.actions);
+        self.copies_items(ui, &album.id);
         if let Some(name) = &album.artist {
             ui.separator();
             if ui.button(format!("Go to {name}")).clicked() {
                 self.actions.push(Action::Go(Route::Artist { name: name.clone(), id: album.artist_ref.clone() }));
             }
+        }
+    }
+
+    /// An album's menu items for its copies, while they're combined and
+    /// more than one source is in view: Keep apart on a combined album, and
+    /// Combine again on one kept apart from a copy that's still in view.
+    pub(super) fn copies_items(&mut self, ui: &mut Ui, id: &str) {
+        if !self.ui.prefs.combine_copies || !super::source_look::mixed(self.session) {
+            return;
+        }
+        let (data, session) = (self.data, self.session);
+        let copies = data.copies_of_album(id);
+        let in_view = |key: &accounts::ItemKey| session.accounts.contains_key(&key.account) && session.scope.includes(key.account);
+        let apart: Vec<&accounts::ItemKey> =
+            copies.iter().filter(|k| data.apart_pairs.iter().any(|(a, b)| (a == *k && in_view(b)) || (b == *k && in_view(a)))).collect();
+        if copies.len() < 2 && apart.is_empty() {
+            return;
+        }
+        ui.separator();
+        if copies.len() > 1 && ui.button("Keep apart").on_hover_text("Show each source's copy as an album of its own").clicked() {
+            self.actions.push(Action::KeepApart(data.album_lead(id).to_owned()));
+        }
+        if !apart.is_empty() && ui.button("Combine again").on_hover_text("Show this album as one with its copies on other sources").clicked() {
+            self.actions.extend(apart.into_iter().map(|key| Action::CombineAgain(key.to_string())));
         }
     }
 }
@@ -601,7 +725,7 @@ mod tests {
     fn albums_and_playlists_download_but_artists_do_not() {
         assert!(matches!(Collection::Album("a".into()).keep(), Some(Keep::Album(id)) if id == "a"));
         assert!(matches!(Collection::Playlist("p".into()).keep(), Some(Keep::Playlist(id)) if id == "p"));
-        assert!(Collection::Artist("Bill Evans".into()).keep().is_none());
+        assert!(Collection::Artist("Bill Evans".into(), None).keep().is_none());
         assert!(matches!(Collection::Playlist("p".into()).action(QueueAction::Add), Action::Playlist(id, QueueAction::Add) if id == "p"));
     }
 }

@@ -53,6 +53,7 @@ apps/
   ond/            Ond (moved from crates/app; package stays ond-player)
   rede/           Rede
 crates/
+  accounts/       permanent account ids and account-qualified item keys (shared)
   audio/          playback engine (shared)
   streamcache/    progressive cache for streamed files (shared)
   offline/        offline download store (shared)
@@ -115,14 +116,14 @@ The shared crates stay free of anything specific to one app, so a third app (pod
 
 ### Identity
 
-Every book, file, chapter and progress record is identified by the account it came from as well as its own id:
+Every book, file, chapter and progress record is identified by the account it came from as well as its own id. The `accounts` crate shares these identity types with Ond:
 
 ```rust
 pub struct AccountId(Uuid);                  // assigned when the account is added
 pub struct ItemKey { account: AccountId, item: String }
 ```
 
-- An account's id is local and permanent. The server URL is a property of the account and can change (new domain, local vs remote address) without orphaning progress or downloads.
+- An account's id is local and permanent. Signing in again with the same server (ignoring trailing slashes and case) and username reuses that account's id, shelf, downloads, progress and colour; signing in to another server or user adds a new account with the next `SourceColor`.
 - Two servers can both have an item `abc`; with the account in the key they never collide. This is the part that's expensive to retrofit, so it's in from the start, even with one account.
 - On-disk names include the account: the stream cache and offline store name files `<account>/<file id>.<suffix>`. (Ond keys these by bare server id today; Rede passes the account-qualified id through `CacheKey`, which takes any string.)
 
@@ -137,7 +138,9 @@ An account is one source with its credentials:
 | RSS (later) | none | The subscriptions. |
 | Jellyfin, Subsonic (maybe later) | as their servers want | Subsonic's bookmark endpoints exist for keeping audiobook positions. |
 
-Each account has its own state shown in the UI: online, offline (server unreachable, playing from downloads), signed out (refresh token expired), syncing. One unreachable server doesn't stop the others.
+Each account has its own `SourceColor`, keyring entry (`id`), shelf database and downloads folder, and `settings.json` stores `scope` (`Scope::only(id)`) so Rede shows one active account at a time and reopens on it (falling back to the first account when migrating an older settings file). Switching accounts stops playback, flushes any pending progress and closes the active play session before opening the picked account's keyring tokens and shelf, dropping late results from the previous session. Signing out marks only the active account `signed_out` and forgets its keyring entry while keeping its row and local shelf in the switcher.
+
+An account has its own state shown in the switcher: online, offline (server unreachable, playing from downloads), signed out (refresh token expired or signed out), syncing. One unreachable server doesn't affect the others.
 
 An account can be marked **listener only**: it receives progress (see [Listening with others](#listening-with-others)) but its libraries aren't shown.
 
@@ -450,7 +453,7 @@ Rede borrows Ond's look (type, spacing, colours, the quiet style) and its three 
 - **Bookmarks:** the Bookmarks tab of the column at the right, beside Chapters and Info, for the book playing. Rows as the chapters tab sets them: a bookmark glyph, the title, the book time at the right; the one at or just behind where the book is has its glyph in the accent, and hovering a row says its chapter. A click jumps there. A row's … (or a right-click) renames it in place (Enter keeps the new title, Esc the old, an empty title isn't taken) or deletes it, with Undo in the toast that says so. Add bookmark at the top does what ⌘B does: a bookmark at the current position titled with its chapter (the row shows the time beside it), confirmed by a toast ("Bookmarked Chapter 5 at 3:56:40") that offers to show the tab when it isn't in view. With none yet, the tab says "No bookmarks yet" and how to add one. Titles are the notes; there are no separate notes yet.
 - **Downloads:** what's downloaded, what's in progress, space used, per source.
 - **Sources:** the accounts, their state, add and remove, which are listener only.
-- **Settings:** playback (skip intervals, default speed, rewind a few seconds after a long pause), sleep timer defaults, audio (voice boost, silence removal, mono), downloads, appearance, updates. Settings is Ond's Settings window, the same one from `shell::kit` (the dimmed app behind it, the grey tab column, the "esc" hint), opened with ⌘,, the gear in the sidebar's footer (and the rail's), Settings… in the account menu, or Settings… in the Playback popover, which opens it on Playback; from the Player or Mini it brings the full window back first, and Esc or a click outside closes it. It starts with three tabs: Playback (skip intervals, the rewinds after a long pause and after sleep, the timer's length, voice boost and skip silence), Account (the server, the last sync with Sync now, who's signed in and how, and Sign out…, which asks first as Ond's does) and About (Ond's About without the updates). The rest join it as tabs when they come. The speed isn't there: the one saved is the one playing, set from the speed chip's Playback popover, which holds only what you change while listening: the speed, voice boost and skip silence.
+- **Settings:** playback (skip intervals, default speed, rewind a few seconds after a long pause), sleep timer defaults, audio (voice boost, silence removal, mono), downloads, appearance, updates. Settings is Ond's Settings window, the same one from `shell::kit` (the dimmed app behind it, the grey tab column, the "esc" hint), opened with ⌘,, the gear in the sidebar's footer (and the rail's), Settings… in the account menu, or Settings… in the Playback popover, which opens it on Playback; from the Player or Mini it brings the full window back first, and Esc or a click outside closes it. It starts with three tabs: Playback (skip intervals, the rewinds after a long pause and after sleep, the timer's length, voice boost and skip silence), Account (the server, the last sync with Sync now, who's signed in and how, and Sign out…, which asks first as Ond's does; it later folded into the Sources tab, which lists every account with a menu each and keeps the account in view's address, sign-in and last sync under the rows) and About (Ond's About without the updates). The rest join it as tabs when they come. The speed isn't there: the one saved is the one playing, set from the speed chip's Playback popover, which holds only what you change while listening: the speed, voice boost and skip silence.
 
 Podcasts, when they come, get their own Home (new episodes as an inbox), Shows and Episodes, behind the Books/Podcasts switch, with an optional combined Home.
 

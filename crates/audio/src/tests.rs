@@ -916,6 +916,8 @@ fn a_next_track_that_fails_to_open_lets_the_current_one_play_out() {
     let seen = events_until(&engine, |e| matches!(e, Event::Ended { .. }));
     let errors: Vec<_> = seen.iter().filter_map(|e| if let Event::Error { track_id, .. } = e { Some(track_id.clone()) } else { None }).collect();
     assert_eq!(errors, [Some("gone".to_owned())], "the error names the track that failed: {seen:?}");
+    let said = seen.iter().find_map(|e| if let Event::Error { message, .. } = e { Some(message.clone()) } else { None }).unwrap();
+    assert!(said.ends_with("gone.wav isn't there"), "said plainly: {said}");
     assert!(matches!(seen.last(), Some(Event::Ended { track_id, .. }) if track_id == "a"), "{seen:?}");
     let out: Vec<i16> = played.lock().unwrap().iter().map(|s| (s * 32_768.0) as i16).collect();
     assert!(out == a, "the current track played out: {} of {} samples", out.len(), a.len());
@@ -1081,7 +1083,7 @@ fn a_seek_the_source_cant_serve_is_an_error_not_a_stuck_hold() {
     // Backwards on a forward-only source.
     engine.send(Command::Seek(Duration::ZERO));
     let seen = events_until(&engine, |e| matches!(e, Event::Error { .. }));
-    assert!(matches!(seen.last(), Some(Event::Error { track_id: Some(id), message }) if id == "a" && message.contains("seek")), "{seen:?}");
+    assert!(matches!(seen.last(), Some(Event::Error { track_id: Some(id), message, .. }) if id == "a" && message.contains("seek")), "{seen:?}");
     let deadline = Deadline::new();
     while engine.status.state() != PlayState::Stopped {
         assert!(!deadline.passed(), "still {:?}", engine.status.state());
@@ -2098,4 +2100,23 @@ fn a_file_shrunk_below_the_linger_floor_still_hands_over_to_the_next() {
     assert!((seconds - 2.23 / 3.0).abs() < 4.0 / 65.0, "{seconds} seconds");
     assert!((engine.status.silence_saved_secs() - 1.77).abs() < 1e-9);
     engine.shutdown(Duration::from_secs(2));
+}
+
+#[test]
+fn missing_files_and_undecodable_files_have_distinct_failure_kinds() {
+    let dir = tempfile::tempdir().unwrap();
+    let invalid = dir.path().join("invalid.wav");
+    std::fs::write(&invalid, b"not audio").unwrap();
+    let engine = spawn(EngineConfig::default(), Box::new(FakeBackend::new(caps(None, 192_000))), None);
+    for (path, kind) in [(dir.path().join("gone.wav"), ErrorKind::Unavailable), (invalid, ErrorKind::Other)] {
+        engine.send(Command::Play(TrackSource {
+            id: "song".into(),
+            url: format!("file://{}", path.display()),
+            suffix: Some("wav".into()),
+            ..Default::default()
+        }));
+        let seen = events_until(&engine, |e| matches!(e, Event::Error { .. }));
+        assert!(matches!(seen.last(), Some(Event::Error { kind: actual, .. }) if *actual == kind), "{seen:?}");
+    }
+    engine.send(Command::Shutdown);
 }

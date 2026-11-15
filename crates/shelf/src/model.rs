@@ -29,7 +29,8 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-use sources::{AccountId, Chapter, Item, ItemKey, ItemSummary, Position, Progress, ProgressUpdate, Series, Stamp, TrackFile};
+use accounts::{AccountId, ItemKey};
+use sources::{Chapter, Item, ItemSummary, Position, Progress, ProgressUpdate, Series, Stamp, TrackFile};
 
 /// What the shelf stores for one item: the listing's view of it, and the rest
 /// once it has been fetched.

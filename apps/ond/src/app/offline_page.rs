@@ -315,7 +315,8 @@ impl ViewCtx<'_> {
             }
             Pin::Playlist(id) => (None, p.label.clone(), Some(Route::Playlist { id: id.clone(), name: p.label.clone() })),
             Pin::Track(id) => {
-                let tr = self.data.track(id);
+                let key = self.downloads.tracks().key(id);
+                let tr = key.as_ref().and_then(|k| self.data.track(&k.item));
                 let cover = tr.and_then(|t| self.data.cover_for(t)).map(str::to_owned);
                 (cover, p.label.clone(), tr.map(|t| Route::Album(t.album_id.clone())))
             }
@@ -362,7 +363,7 @@ impl ViewCtx<'_> {
                     Pin::Album(id) => self.actions.push(Action::Album(id.clone(), QueueAction::Play { start: 0 })),
                     Pin::Playlist(id) => self.actions.push(Action::Playlist(id.clone(), QueueAction::Play { start: 0 })),
                     Pin::Track(id) => {
-                        if let Some(tr) = self.data.track(id).cloned() {
+                        if let Some(tr) = self.downloads.tracks().key(id).and_then(|k| self.data.track(&k.item)).cloned() {
                             self.play_from_album(&tr, QueueAction::Play { start: 0 });
                         }
                     }

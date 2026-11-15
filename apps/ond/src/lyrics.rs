@@ -35,9 +35,23 @@ pub struct SongStats {
     pub last_played: Option<String>,
 }
 
+/// One version of a song's words, before selection and cleanup.
+#[derive(Debug, Clone, Default)]
+pub struct StructuredLyrics {
+    pub synced: bool,
+    pub offset: Option<i64>,
+    pub line: Vec<LyricLine>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct LyricLine {
+    pub start: Option<i64>,
+    pub value: String,
+}
+
 /// The best of the server's versions: synced over unsynced, then the one with
 /// the most words (a sidecar `.lrc` usually beats a stub tag).
-pub fn pick(versions: Vec<subsonic::StructuredLyrics>) -> Option<Lyrics> {
+pub fn pick(versions: Vec<StructuredLyrics>) -> Option<Lyrics> {
     let mut best: Option<(bool, usize, Lyrics)> = None;
     for v in versions {
         let synced = v.synced && v.line.iter().any(|l| l.start.is_some());
@@ -353,7 +367,6 @@ impl Follow {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use subsonic::{LyricLine, StructuredLyrics};
 
     fn ln(start: Option<i64>, v: &str) -> LyricLine {
         LyricLine { start, value: v.into() }
@@ -366,7 +379,7 @@ mod tests {
     #[test]
     fn picks_synced_over_plain_and_applies_offset() {
         let plain = StructuredLyrics { synced: false, line: vec![ln(None, "many many words here"), ln(None, "and more words")], ..Default::default() };
-        let synced = StructuredLyrics { synced: true, offset: Some(200), line: vec![ln(Some(1000), "one"), ln(Some(100), "zero")], ..Default::default() };
+        let synced = StructuredLyrics { synced: true, offset: Some(200), line: vec![ln(Some(1000), "one"), ln(Some(100), "zero")] };
         let got = pick(vec![plain, synced]).unwrap();
         // Sorted, shifted, never negative.
         assert_eq!(got, Lyrics::Synced(vec![Line { start_ms: 0, text: "zero".into() }, Line { start_ms: 800, text: "one".into() }]));
@@ -380,7 +393,7 @@ mod tests {
     #[test]
     fn a_positive_offset_shows_lines_sooner_and_a_negative_one_later() {
         let at = |offset| {
-            let v = StructuredLyrics { synced: true, offset: Some(offset), line: vec![ln(Some(5000), "line")], ..Default::default() };
+            let v = StructuredLyrics { synced: true, offset: Some(offset), line: vec![ln(Some(5000), "line")] };
             match pick(vec![v]) {
                 Some(Lyrics::Synced(l)) => l[0].start_ms,
                 other => panic!("{other:?}"),

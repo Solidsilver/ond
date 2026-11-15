@@ -29,6 +29,7 @@ use smtc as system;
 pub use smtc::set_window;
 pub mod scrobble;
 
+use crate::source::{Src, TrackKey, stream_name};
 use audio::{PlayState, Status};
 use scrobble::{Listen, Outcome, PendingPlay, RetryQueue};
 use std::collections::HashMap;
@@ -36,7 +37,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::time::{Duration, Instant, SystemTime};
-use subsonic::Client;
 
 /// A command from outside the app: media keys, Control Center, headphones.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -60,7 +60,8 @@ pub enum Remote {
 /// What the system shows for a track.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Info {
-    pub track_id: String,
+    pub key: TrackKey,
+    pub token: u64,
     pub title: String,
     pub artist: Option<String>,
     pub album: Option<String>,
@@ -90,19 +91,29 @@ impl State {
 }
 
 pub struct Config {
+    pub account: Option<accounts::AccountId>,
     pub status: Arc<Status>,
     pub rt: tokio::runtime::Handle,
-    /// The cover art cache, read for artwork (and filled when it's missing).
+    /// The cover art cache root (each account has a folder inside it), read
+    /// for artwork (and filled when it's missing).
     pub art_dir: PathBuf,
     /// Where plays the server didn't take wait for a retry.
     pub retry_file: PathBuf,
+    /// Data root for switching the retry file when a different account connects.
+    pub retry_root: Option<PathBuf>,
     pub scrobble: bool,
     /// Called for each remote command (on the main thread on macOS).
     pub remote: Arc<dyn Fn(Remote) + Send + Sync>,
 }
 
 enum In {
-    Client(Client),
+    Register(Src),
+    Remove(accounts::AccountId),
+    MultiSubmitted {
+        play: PendingPlay,
+        outcome: Outcome,
+    },
+    Source(Option<Src>),
     Known(Info),
     Engine(audio::Event),
     Scrobbling(bool),
@@ -129,8 +140,19 @@ impl Session {
         Self { tx }
     }
 
-    pub fn set_client(&self, client: Client) {
-        let _ = self.tx.send(In::Client(client));
+    pub fn add_source(&self, source: Src) {
+        let _ = self.tx.send(In::Register(source));
+    }
+    pub fn remove_source(&self, account: accounts::AccountId) {
+        let _ = self.tx.send(In::Remove(account));
+    }
+
+    pub fn set_source(&self, source: Src) {
+        let _ = self.tx.send(In::Source(Some(source)));
+    }
+
+    pub fn clear_source(&self) {
+        let _ = self.tx.send(In::Source(None));
     }
 
     /// Describes a track the engine may start (the current one and the next).
@@ -184,10 +206,13 @@ impl Publisher {
 struct Worker {
     cfg: Config,
     tx: Sender<In>,
-    client: Option<Client>,
+    source: Option<Src>,
+    registered: bool,
+    sources: HashMap<accounts::AccountId, Src>,
+    retries: HashMap<accounts::AccountId, (RetryQueue, bool, Instant)>,
     scrobble: bool,
-    /// Metadata for recently named tracks, by id.
-    known: HashMap<String, Info>,
+    /// Metadata for recently named queue items, by the engine's token.
+    known: HashMap<u64, Info>,
     current: Option<Info>,
     listen: Option<Listen>,
     publisher: Publisher,
@@ -199,7 +224,7 @@ struct Worker {
     clock: Instant,
     /// The track whose cover was last asked for. Fetches run in the
     /// background, so an earlier track's cover can arrive after a later one's.
-    art_for: Arc<std::sync::Mutex<String>>,
+    art_for: Arc<std::sync::Mutex<Option<TrackKey>>>,
 }
 
 /// How often to look at the engine while something is current.
@@ -212,12 +237,15 @@ const KNOWN_MAX: usize = 16;
 
 impl Worker {
     fn new(cfg: Config, tx: Sender<In>) -> Self {
-        let retry = RetryQueue::load(&cfg.retry_file);
+        let retry = RetryQueue::load(&cfg.retry_file, cfg.account);
         Self {
             scrobble: cfg.scrobble,
             cfg,
             tx,
-            client: None,
+            source: None,
+            registered: false,
+            sources: HashMap::new(),
+            retries: HashMap::new(),
             known: HashMap::new(),
             current: None,
             listen: None,
@@ -253,23 +281,69 @@ impl Worker {
 
     fn handle(&mut self, msg: In) {
         match msg {
-            In::Client(c) => {
-                self.client = Some(c);
+            In::Register(source) => {
+                self.registered = true;
+                let account = source.account();
+                if !self.retries.contains_key(&account) {
+                    let file = self
+                        .cfg
+                        .retry_root
+                        .as_ref()
+                        .map(|r| crate::storage::account_dir(r, account).join("scrobbles.json"))
+                        .unwrap_or_else(|| self.cfg.retry_file.clone());
+                    self.retries.insert(account, (RetryQueue::load(&file, Some(account)), false, Instant::now()));
+                }
+                self.sources.insert(account, source);
+                if let Some((_, _, next)) = self.retries.get_mut(&account) {
+                    *next = Instant::now();
+                }
+                self.flush_source(account);
+            }
+            In::Remove(account) => {
+                self.sources.remove(&account);
+            }
+            In::MultiSubmitted { play, outcome } => {
+                if let Some((queue, flushing, next)) = self.retries.get_mut(&play.key.account) {
+                    *flushing = false;
+                    match outcome {
+                        Outcome::Done | Outcome::Refused => {
+                            queue.pop_front();
+                            *next = Instant::now();
+                        }
+                        Outcome::Unreachable => *next = Instant::now() + RETRY_EVERY,
+                    }
+                }
+                self.flush_source(play.key.account);
+            }
+            In::Source(c) => {
+                if let Some(account) = c.as_ref().map(|s| s.account())
+                    && Some(account) != self.cfg.account
+                {
+                    self.flushing = false;
+                    self.cfg.account = Some(account);
+                    if let Some(root) = &self.cfg.retry_root {
+                        let path = crate::storage::account_dir(root, account).join("scrobbles.json");
+                        self.retry = RetryQueue::load(&path, Some(account));
+                    } else {
+                        self.retry.retain_account(Some(account));
+                    }
+                }
+                self.source = c;
                 self.next_flush = Instant::now();
             }
             In::Known(info) => {
-                if self.known.len() >= KNOWN_MAX && !self.known.contains_key(&info.track_id) {
+                if self.known.len() >= KNOWN_MAX && !self.known.contains_key(&info.token) {
                     // Keep the playing track's, which an engine restart shows again.
-                    let current = self.current.as_ref().map(|c| &c.track_id);
-                    let listen = self.listen.as_ref().map(|l| &l.track_id);
+                    let current = self.current.as_ref().map(|c| &c.token);
+                    let listen = self.listen.as_ref().map(|l| &l.token);
                     self.known.retain(|id, _| Some(id) == current || Some(id) == listen);
                 }
                 // A late description of the current track (e.g. the album name arrived).
-                if self.current.as_ref().is_some_and(|c| c.track_id == info.track_id) {
+                if self.current.as_ref().is_some_and(|c| c.token == info.token && c.key == info.key) {
                     self.current = Some(info.clone());
                     self.publisher.reset();
                 }
-                self.known.insert(info.track_id.clone(), info);
+                self.known.insert(info.token, info);
             }
             In::Scrobbling(on) => self.scrobble = on,
             In::Engine(ev) => self.engine(ev),
@@ -280,38 +354,39 @@ impl Worker {
     fn engine(&mut self, ev: audio::Event) {
         let now = self.now();
         match ev {
-            audio::Event::TrackStarted { track_id, restart, .. } => {
+            audio::Event::TrackStarted { token, restart, .. } => {
+                let Some(info) = self.known.get(&token).cloned() else { return };
+                let key = info.key.clone();
                 // The engine started the same track over (device switch, a seek
                 // it couldn't serve in place): the same listen carries on.
-                if restart && self.listen.as_ref().is_some_and(|l| l.track_id == track_id) {
+                if restart && self.listen.as_ref().is_some_and(|l| l.token == token && l.key == key) {
                     // The poller may have seen the engine stopped in between and cleared it.
-                    if self.current.as_ref().is_none_or(|c| c.track_id != track_id) {
-                        self.current = self.known.get(&track_id).cloned();
+                    if self.current.as_ref().is_none_or(|c| c.token != token || c.key != key) {
+                        self.current = Some(info.clone());
                     }
                     self.publisher.reset();
                     return;
                 }
-                let info = self.known.get(&track_id).cloned();
                 let started_ms = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
-                self.listen = Some(Listen::new(track_id.clone(), started_ms, info.as_ref().and_then(|i| i.duration_secs)));
+                self.listen = Some(Listen::new(key.clone(), token, started_ms, info.duration_secs));
                 self.publisher.reset();
                 if self.scrobble
-                    && let Some(client) = self.client.clone()
+                    && let Some(source) = self.source_for(key.account)
+                    && source.capabilities().scrobbling
+                    && source.account() == key.account
                 {
                     // "Now playing" is best effort; it's stale soon anyway.
                     self.cfg.rt.spawn(async move {
-                        if let Err(e) = client.scrobble(&track_id, started_ms, false).await {
+                        if let Err(e) = source.scrobble(&key.item, started_ms, false).await {
                             tracing::debug!("now playing: {e}");
                         }
                     });
                 }
-                if let Some(info) = &info {
-                    self.fetch_artwork(info);
-                }
-                self.current = info;
+                self.fetch_artwork(&info);
+                self.current = Some(info);
             }
             audio::Event::Seeked { track_id, position_secs } => {
-                if let Some(l) = self.listen.as_mut().filter(|l| l.track_id == track_id) {
+                if let Some(l) = self.listen.as_mut().filter(|l| stream_name(&l.key) == track_id) {
                     l.seeked(position_secs, now);
                 }
             }
@@ -324,6 +399,9 @@ impl Worker {
     }
 
     fn poll(&mut self) {
+        for account in self.sources.keys().copied().collect::<Vec<_>>() {
+            self.flush_source(account);
+        }
         let status = self.cfg.status.clone();
         let state = State::of(status.state());
         let pos = status.position_secs();
@@ -339,13 +417,13 @@ impl Worker {
             l.set_duration(status.duration_secs());
             l.observe(pos, state == State::Playing, now);
             if l.take_due() {
-                let play = PendingPlay { id: l.track_id.clone(), time_ms: l.started_ms };
+                let play = PendingPlay { key: l.key.clone(), time_ms: l.started_ms };
                 self.submit(play);
             }
         }
         match &self.current {
             Some(info) => {
-                if self.publisher.should(&info.track_id, state, pos, now) {
+                if self.publisher.should(&info.key.to_string(), state, pos, now) {
                     let mut info = info.clone();
                     if info.duration_secs.is_none() {
                         info.duration_secs = status.duration_secs();
@@ -363,12 +441,45 @@ impl Worker {
         }
     }
 
-    fn submit(&mut self, play: PendingPlay) {
+    fn source_for(&self, account: accounts::AccountId) -> Option<Src> {
+        if self.registered { self.sources.get(&account).cloned() } else { self.source.clone().filter(|s| s.account() == account) }
+    }
+
+    fn flush_source(&mut self, account: accounts::AccountId) {
         if !self.scrobble {
             return;
         }
+        let Some(source) = self.sources.get(&account).filter(|s| s.capabilities().scrobbling).cloned() else { return };
+        let Some((queue, flushing, next)) = self.retries.get_mut(&account) else { return };
+        if *flushing || Instant::now() < *next {
+            return;
+        }
+        let Some(play) = queue.front().cloned() else { return };
+        *flushing = true;
+        let tx = self.tx.clone();
+        self.cfg.rt.spawn(async move {
+            let result = source.scrobble(&play.key.item, play.time_ms, true).await;
+            let _ = tx.send(In::MultiSubmitted { play, outcome: Outcome::of(&result) });
+        });
+    }
+
+    fn submit(&mut self, play: PendingPlay) {
+        if self.registered {
+            if !self.scrobble || self.sources.get(&play.key.account).is_some_and(|s| !s.capabilities().scrobbling) {
+                return;
+            }
+            let account = play.key.account;
+            if let Some((queue, _, _)) = self.retries.get_mut(&account) {
+                queue.push(play);
+            }
+            self.flush_source(account);
+            return;
+        }
+        if Some(play.key.account) != self.cfg.account || !self.scrobble || self.source.as_ref().is_some_and(|s| !s.capabilities().scrobbling) {
+            return;
+        }
         // Keep plays in order: behind any that are still waiting.
-        if !self.retry.is_empty() || self.client.is_none() {
+        if !self.retry.is_empty() || self.source.is_none() {
             self.retry.push(play);
             self.flush_retries();
             return;
@@ -377,18 +488,21 @@ impl Worker {
     }
 
     fn send(&mut self, play: PendingPlay, from_retry: bool) {
-        let Some(client) = self.client.clone() else { return };
+        let Some(source) = self.source.clone().filter(|s| s.account() == play.key.account) else { return };
         let tx = self.tx.clone();
         self.cfg.rt.spawn(async move {
-            let result = client.scrobble(&play.id, play.time_ms, true).await;
+            let result = source.scrobble(&play.key.item, play.time_ms, true).await;
             if let Err(e) = &result {
-                tracing::info!("scrobble {}: {e}", play.id);
+                tracing::info!("scrobble {}: {e}", play.key.item);
             }
             let _ = tx.send(In::Submitted { play, outcome: Outcome::of(&result), from_retry });
         });
     }
 
     fn submitted(&mut self, play: PendingPlay, outcome: Outcome, from_retry: bool) {
+        if Some(play.key.account) != self.cfg.account {
+            return;
+        }
         if from_retry {
             self.flushing = false;
         }
@@ -411,13 +525,16 @@ impl Worker {
 
     /// Sends the oldest waiting play; each answer sends the next.
     fn flush_retries(&mut self) {
-        if self.flushing || self.client.is_none() {
+        if self.flushing || self.source.as_ref().is_none_or(|s| !s.capabilities().scrobbling) {
             return;
         }
         let Some(play) = self.retry.front().cloned() else {
             self.next_flush = Instant::now() + RETRY_EVERY;
             return;
         };
+        if self.source.as_ref().is_none_or(|s| s.account() != play.key.account) {
+            return;
+        }
         self.flushing = true;
         self.send(play, true);
     }
@@ -425,16 +542,16 @@ impl Worker {
     /// Hands the cover to the system: from the art cache if it's there, else from
     /// the server (and into the cache for the UI).
     fn fetch_artwork(&self, info: &Info) {
-        let Some(cover) = info.cover.clone() else { return };
-        let dir = self.cfg.art_dir.clone();
-        let client = self.client.clone();
-        let track_id = info.track_id.clone();
-        info.track_id.clone_into(&mut self.art_for.lock().unwrap_or_else(|e| e.into_inner()));
+        let Some(cover) = info.cover.as_deref().map(crate::source::identity::bare).map(str::to_owned) else { return };
+        let dir = crate::art::account_dir(&self.cfg.art_dir, info.key.account);
+        let source = self.source_for(info.key.account);
+        let key = info.key.clone();
+        *self.art_for.lock().unwrap_or_else(|e| e.into_inner()) = Some(key.clone());
         let art_for = Arc::clone(&self.art_for);
         // Only the cover for the track asked about last reaches the system.
         let hand_over = move |bytes: Vec<u8>| {
-            if *art_for.lock().unwrap_or_else(|e| e.into_inner()) == track_id {
-                set_artwork(track_id, bytes);
+            if art_for.lock().unwrap_or_else(|e| e.into_inner()).as_ref() == Some(&key) {
+                set_artwork(key.item, bytes);
             }
         };
         self.cfg.rt.spawn(async move {
@@ -443,8 +560,8 @@ impl Worker {
                     return hand_over(bytes);
                 }
             }
-            let Some(client) = client else { return };
-            if let Some(bytes) = crate::art::fetch_cached(&client, &dir, &cover, 512).await {
+            let Some(source) = source else { return };
+            if let Some(bytes) = crate::art::fetch_cached(&source, &dir, &cover, 512).await {
                 hand_over(bytes);
             }
         });
@@ -477,7 +594,7 @@ mod tests {
         assert!(p.should("b", State::Playing, 1.0, 34.0));
     }
 
-    /// A worker with no client (plays it submits wait in its retry queue) over a
+    /// A worker with no source (plays it submits wait in its retry queue) over a
     /// `Status` the test sets with `preview`. Its clock is moved by hand.
     struct Rig {
         w: Worker,
@@ -495,10 +612,12 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let status = Arc::new(Status::default());
             let cfg = Config {
+                account: Some(crate::test_tracks::account()),
                 status: status.clone(),
                 rt: rt.handle().clone(),
                 art_dir: dir.path().join("art"),
                 retry_file: dir.path().join("scrobbles.json"),
+                retry_root: None,
                 scrobble,
                 remote: Arc::new(|_| {}),
             };
@@ -508,7 +627,10 @@ mod tests {
 
         fn started(&mut self, id: &str, restart: bool) {
             let format = audio::StreamFormat { sample_rate: 44_100, channels: 2, bits_per_sample: Some(16) };
-            self.w.engine(audio::Event::TrackStarted { track_id: id.into(), token: 1, format, gapless: false, restart });
+            let info = Self::info(id);
+            let token = info.token;
+            self.w.handle(In::Known(info));
+            self.w.engine(audio::Event::TrackStarted { track_id: id.into(), token, format, gapless: false, restart });
         }
 
         /// One look by the poller, `secs` after the last one.
@@ -530,7 +652,20 @@ mod tests {
         }
 
         fn info(id: &str) -> Info {
-            Info { track_id: id.into(), title: id.into(), artist: None, album: None, duration_secs: Some(SONG_SECS), cover: None }
+            Info {
+                key: crate::test_tracks::key(id),
+                token: {
+                    use std::hash::{Hash, Hasher};
+                    let mut h = std::collections::hash_map::DefaultHasher::new();
+                    id.hash(&mut h);
+                    h.finish()
+                },
+                title: id.into(),
+                artist: None,
+                album: None,
+                duration_secs: Some(SONG_SECS),
+                cover: None,
+            }
         }
     }
 
@@ -561,7 +696,7 @@ mod tests {
         r.look(PlayState::Loading, 0.0, 0.5);
         r.started("a", true);
         assert_eq!(r.w.listen.as_ref().map(|l| l.started_ms), Some(first), "the same listen carries on");
-        assert_eq!(r.w.current.as_ref().map(|c| c.track_id.as_str()), Some("a"), "and the system still shows the track");
+        assert_eq!(r.w.current.as_ref().map(|c| c.key.item.as_str()), Some("a"), "and the system still shows the track");
         r.play(pos, 245);
         assert_eq!(r.w.retry.len(), 1, "the play counted once");
     }
@@ -580,13 +715,61 @@ mod tests {
         assert_eq!(r.w.retry.len(), 2, "played again: counted again");
     }
 
-    fn client() -> Client {
+    fn source() -> Src {
         // Requests are spawned on the rig's runtime, which never runs them.
-        Client::new("http://127.0.0.1:9", subsonic::Credentials::new("u", "p")).unwrap()
+        crate::source::subsonic::test_source()
+    }
+
+    #[test]
+    fn a_previous_sign_ins_track_is_never_scrobbled_to_the_new_account() {
+        use crate::source::{Capabilities, fake::Fake};
+        use std::sync::atomic::Ordering;
+        let mut r = Rig::new(true);
+        let mut fake = Fake::new(Capabilities { scrobbling: true, ..Capabilities::none() });
+        fake.account = accounts::AccountId::new();
+        let source = Arc::new(fake);
+        r.w.retry.push(pending("abc", 1));
+        r.w.handle(In::Source(Some(source.clone())));
+        r.started("abc", false);
+        r.play(0.0, 245);
+        r.w.flush_retries();
+        answer(&mut r, pending("abc", 1), Outcome::Unreachable, false);
+        r._rt.block_on(async { tokio::task::yield_now().await });
+        assert_eq!(source.scrobbles.load(Ordering::SeqCst), 0);
+        assert!(r.w.retry.is_empty());
+        assert!(!r.w.flushing);
+        let mut own = Rig::info("abc");
+        own.key.account = source.account;
+        own.token += 1;
+        let token = own.token;
+        r.w.handle(In::Known(own));
+        let format = audio::StreamFormat { sample_rate: 44_100, channels: 2, bits_per_sample: Some(16) };
+        r.w.engine(audio::Event::TrackStarted { track_id: "abc".into(), token, format, gapless: false, restart: false });
+        assert_eq!(r.w.listen.as_ref().unwrap().key.account, source.account);
+        r.play(0.0, 245);
+        r._rt.block_on(async { tokio::task::yield_now().await });
+        assert_eq!(source.scrobbles.load(Ordering::SeqCst), 2, "now playing and the completed listen go to their own source");
+    }
+
+    #[test]
+    fn a_source_without_scrobbling_sends_no_plays_or_retries() {
+        use crate::source::{Capabilities, fake::Fake};
+        use std::sync::atomic::Ordering;
+        let mut r = Rig::new(true);
+        let source = Arc::new(Fake::new(Capabilities::none()));
+        r.w.retry.push(pending("old", 1));
+        r.w.handle(In::Source(Some(source.clone())));
+        r.w.flush_retries();
+        r.started("a", false);
+        r.play(0.0, 245);
+        r._rt.block_on(async { tokio::task::yield_now().await });
+        assert_eq!(source.scrobbles.load(Ordering::SeqCst), 0);
+        assert!(!r.w.flushing);
+        assert_eq!(r.w.retry.len(), 1, "only the earlier play remains queued");
     }
 
     fn pending(id: &str, time_ms: u64) -> PendingPlay {
-        PendingPlay { id: id.into(), time_ms }
+        PendingPlay { key: crate::test_tracks::key(id), time_ms }
     }
 
     fn answer(r: &mut Rig, play: PendingPlay, outcome: Outcome, from_retry: bool) {
@@ -597,7 +780,7 @@ mod tests {
     fn a_new_play_waits_behind_older_ones() {
         let mut r = Rig::new(true);
         r.w.retry.push(pending("old", 1));
-        r.w.handle(In::Client(client()));
+        r.w.handle(In::Source(Some(source())));
         r.w.flush_retries();
         assert!(r.w.flushing, "the old play is being sent");
         r.started("a", false);
@@ -616,7 +799,7 @@ mod tests {
     #[test]
     fn a_play_goes_straight_out_when_nothing_waits() {
         let mut r = Rig::new(true);
-        r.w.handle(In::Client(client()));
+        r.w.handle(In::Source(Some(source())));
         r.started("a", false);
         r.play(0.0, 245);
         assert!(r.w.retry.is_empty(), "sent, not queued");
@@ -634,7 +817,7 @@ mod tests {
         let mut r = Rig::new(true);
         r.w.retry.push(pending("a", 1));
         r.w.retry.push(pending("b", 2));
-        r.w.handle(In::Client(client()));
+        r.w.handle(In::Source(Some(source())));
         r.w.flush_retries();
         let before = Instant::now();
         answer(&mut r, pending("a", 1), Outcome::Unreachable, true);
@@ -659,7 +842,7 @@ mod tests {
         }
         assert_eq!(r.w.known.len(), KNOWN_MAX);
         r.w.handle(In::Known(Rig::info("next")));
-        let mut kept: Vec<_> = r.w.known.keys().cloned().collect();
+        let mut kept: Vec<_> = r.w.known.values().map(|i| i.key.item.clone()).collect();
         kept.sort();
         assert_eq!(kept, ["a", "next"]);
         // Also while a restart is under way and nothing is shown.
@@ -668,8 +851,68 @@ mod tests {
         for i in 1..KNOWN_MAX {
             r.w.handle(In::Known(Rig::info(&format!("u{i}"))));
         }
-        assert!(r.w.known.contains_key("a"));
+        assert!(r.w.known.values().any(|i| i.key.item == "a"));
         r.started("a", true);
-        assert_eq!(r.w.current.as_ref().map(|c| c.track_id.as_str()), Some("a"));
+        assert_eq!(r.w.current.as_ref().map(|c| c.key.item.as_str()), Some("a"));
+    }
+
+    #[test]
+    fn artwork_for_two_accounts_with_the_same_cover_id_stays_separate() {
+        use crate::source::{Capabilities, fake::Fake};
+        let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(1).enable_all().build().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let art_dir = dir.path().join("art");
+        let status = Arc::new(Status::default());
+        let (one, two) = (accounts::AccountId::new(), accounts::AccountId::new());
+        let cfg = Config {
+            account: Some(one),
+            status,
+            rt: rt.handle().clone(),
+            art_dir: art_dir.clone(),
+            retry_file: dir.path().join("scrobbles.json"),
+            retry_root: None,
+            scrobble: false,
+            remote: Arc::new(|_| {}),
+        };
+        let (tx, _rx) = channel();
+        let mut w = Worker::new(cfg, tx);
+        let source_for = |account: accounts::AccountId, bytes: &[u8]| -> Src {
+            let mut fake = Fake::new(Capabilities::none());
+            fake.account = account;
+            fake.covers.lock().unwrap().insert("cov-1".into(), bytes.to_vec());
+            Arc::new(fake)
+        };
+        let start = |w: &mut Worker, account: accounts::AccountId, token: u64| {
+            let info = Info {
+                key: TrackKey::new(account, "t-1"),
+                token,
+                title: "Song".into(),
+                artist: None,
+                album: None,
+                duration_secs: Some(SONG_SECS),
+                cover: Some("cov-1".into()),
+            };
+            w.handle(In::Known(info));
+            let format = audio::StreamFormat { sample_rate: 44_100, channels: 2, bits_per_sample: Some(16) };
+            w.engine(audio::Event::TrackStarted { track_id: "t-1".into(), token, format, gapless: false, restart: false });
+        };
+
+        // The UI's art cache makes the folder when the account connects.
+        std::fs::create_dir_all(crate::art::account_dir(&art_dir, one)).unwrap();
+        w.handle(In::Source(Some(source_for(one, b"cover-one"))));
+        start(&mut w, one, 1);
+        let one_file = crate::art::cover_file(&crate::art::account_dir(&art_dir, one), "cov-1", 512);
+        testkit::wait_until("account one's now-playing cover to be cached", || one_file.exists());
+        assert_eq!(std::fs::read(&one_file).unwrap(), b"cover-one");
+        assert!(!crate::art::cover_file(&art_dir, "cov-1", 512).exists());
+
+        // The UI's art cache makes the folder when the account connects.
+        std::fs::create_dir_all(crate::art::account_dir(&art_dir, two)).unwrap();
+        w.handle(In::Source(Some(source_for(two, b"cover-two"))));
+        start(&mut w, two, 2);
+        let two_file = crate::art::cover_file(&crate::art::account_dir(&art_dir, two), "cov-1", 512);
+        testkit::wait_until("account two's now-playing cover to be cached", || two_file.exists());
+        assert_eq!(std::fs::read(&two_file).unwrap(), b"cover-two");
+        assert_eq!(std::fs::read(&one_file).unwrap(), b"cover-one");
     }
 }

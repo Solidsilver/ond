@@ -59,6 +59,50 @@ pub const FILE_MANAGER: &str = if cfg!(target_os = "macos") {
     "File Manager"
 };
 
+/// Asks where to save an exported `.m3u` playlist (`suggested_name`, starting in
+/// `start`) and hands the chosen path (`None` when cancelled) to `done`.
+pub fn save_m3u(suggested_name: &str, start: &Path, done: impl FnOnce(Option<PathBuf>) + Send + 'static) {
+    let file_name =
+        if suggested_name.ends_with(".m3u") || suggested_name.ends_with(".m3u8") { suggested_name.to_owned() } else { format!("{suggested_name}.m3u") };
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let dialog =
+            rfd::FileDialog::new().set_title("Export playlist").set_directory(start).set_file_name(&file_name).add_filter("M3U playlist", &["m3u", "m3u8"]);
+        let spawned = std::thread::Builder::new().name("m3u-save".into()).spawn(move || done(dialog.save_file()));
+        if let Err(e) = spawned {
+            tracing::warn!("save dialog: {e}");
+        }
+    }
+    #[cfg(not(all(unix, not(target_os = "macos"))))]
+    done(modal_save(&file_name, start));
+}
+
+#[cfg(target_os = "macos")]
+fn modal_save(file_name: &str, start: &Path) -> Option<PathBuf> {
+    use objc2::MainThreadMarker;
+    use objc2_app_kit::NSSavePanel;
+    use objc2_foundation::{NSString, NSURL};
+
+    let mtm = MainThreadMarker::new()?;
+    let panel = NSSavePanel::savePanel(mtm);
+    panel.setCanCreateDirectories(true);
+    panel.setPrompt(Some(&NSString::from_str("Export")));
+    panel.setMessage(Some(&NSString::from_str("Export playlist as M3U")));
+    panel.setNameFieldStringValue(&NSString::from_str(file_name));
+    let start = NSURL::fileURLWithPath(&NSString::from_str(&start.to_string_lossy()));
+    panel.setDirectoryURL(Some(&start));
+    if panel.runModal() != 1 {
+        return None;
+    }
+    let path = panel.URL()?.path()?;
+    Some(PathBuf::from(path.to_string()))
+}
+
+#[cfg(windows)]
+fn modal_save(file_name: &str, start: &Path) -> Option<PathBuf> {
+    rfd::FileDialog::new().set_title("Export playlist").set_directory(start).set_file_name(file_name).add_filter("M3U playlist", &["m3u", "m3u8"]).save_file()
+}
+
 /// Opens `dir` in the file manager.
 pub fn reveal(dir: &Path) -> std::io::Result<()> {
     let opener = if cfg!(target_os = "macos") {

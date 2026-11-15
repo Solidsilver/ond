@@ -2,16 +2,20 @@
 //! changes or the folder moves), what's kept and waiting to be kept, and the
 //! messages and actions about them.
 
+mod projection;
+pub(super) use projection::DownloadView;
+
 use super::{Action, OndApp, Session};
 use crate::bridge::{Bridge, ListKey, OfflineMsg};
 use crate::prefs::Prefs;
+use crate::source::{Src, TrackKey, stream_name};
+use accounts::AccountId;
 use library::Track;
 use offline::{OfflineStore, Pin, TrackRef};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
-use subsonic::Client;
 
 /// What a download action applies to, as the user asked for it. The
 /// offline store keeps it as `offline::Pin`s: an album or playlist as one,
@@ -67,7 +71,11 @@ pub(super) fn playable(
     transcode: Option<&audio::Transcode>,
     track: &Track,
 ) -> bool {
-    session.expected() || downloads.snap.is_done(&track.id) || crate::local::is_cached(cache, transcode, track)
+    session.for_item(&track.id).expected()
+        || session.for_item(&track.id).account().is_some_and(|account| {
+            let key = crate::source::identity::key(account, &track.id);
+            downloads.tracks().is_done(&key) || crate::local::is_cached(cache, transcode, &key, track)
+        })
 }
 
 /// Offline downloads, and their state as of this frame.
@@ -84,6 +92,7 @@ pub struct Downloads {
     pub base: PathBuf,
     /// Whose store is open, or opening (`None` before anyone has signed in).
     account: Option<u32>,
+    pub(crate) owner: Option<AccountId>,
     /// Numbers the opens started. A store that arrives for an older one (the
     /// user switched again meanwhile) is closed unused.
     generation: u64,
@@ -100,7 +109,7 @@ pub struct Downloads {
 }
 
 /// Opens the offline store kept in a folder, with an optional size limit.
-type OpenStore = Arc<dyn Fn(PathBuf, Option<u64>) -> anyhow::Result<OfflineStore> + Send + Sync>;
+type OpenStore = Arc<dyn Fn(PathBuf, Option<u64>, Option<AccountId>) -> anyhow::Result<OfflineStore> + Send + Sync>;
 
 /// A move's progress notice is updated at most this often.
 const MOVE_PROGRESS_EVERY: Duration = Duration::from_millis(500);
@@ -130,13 +139,19 @@ impl Downloads {
     /// How a store is opened: in a folder, with a size limit, the stream
     /// cache to link finished streams from, and the window to wake.
     pub(super) fn opener(rt: tokio::runtime::Handle, ctx: egui::Context, cache: streamcache::StreamCache) -> OpenStore {
-        Arc::new(move |dir, limit| {
+        Arc::new(move |dir, limit, account| {
             let repaint = ctx.clone();
+            if let Some(account) = account {
+                crate::storage::qualify_downloads(&dir, account)?;
+            }
             let cfg = offline::OfflineConfig { dir, limit, reply_check: crate::bridge::reply_check() };
             let store = OfflineStore::open(cfg, rt.clone(), Arc::new(move || repaint.request_repaint()))?;
             // A track that finished streaming is linked in rather than downloaded again.
             let cached = cache.clone();
-            store.set_cache_lookup(Arc::new(move |r: &TrackRef| cached.complete_path(&streamcache::CacheKey::original(r.id.clone(), r.suffix.clone()))));
+            store.set_cache_lookup(Arc::new(move |r: &TrackRef| {
+                let key = TrackKey::parse(&r.id).ok().filter(|k| Some(k.account) == account)?;
+                cached.complete_path(&streamcache::CacheKey::original(stream_name(&key).into_owned(), r.suffix.clone()))
+            }));
             Ok(store)
         })
     }
@@ -145,19 +160,21 @@ impl Downloads {
     /// or after moving the downloads from `move_from` in the background.
     pub(super) fn start(
         base: PathBuf,
-        account: Option<u32>,
-        limit: Option<u64>,
-        move_from: Option<PathBuf>,
+        settings: &crate::settings::Settings,
         open: OpenStore,
         bridge: &Bridge,
         notices: &mut Vec<String>,
     ) -> anyhow::Result<Self> {
+        let (account, owner) = (settings.account_id(), settings.account());
+        let limit = settings.offline_limit_gb.map(|gb| gb * 1_000_000_000);
+        let move_from = settings.offline_move_from.clone();
         let mut downloads = Downloads {
             store: None,
             snap: Arc::default(),
             pending_pins: Vec::new(),
             base,
             account,
+            owner,
             generation: 0,
             opening: false,
             deferred: Vec::new(),
@@ -175,12 +192,46 @@ impl Downloads {
                 downloads.open_in_background(limit, Some(from), bridge);
             }
             None => {
-                let store = (downloads.open)(Downloads::dir_for(&downloads.base, account)?, limit)?;
+                let store = (downloads.open)(Downloads::dir_for(&downloads.base, account)?, limit, owner)?;
                 downloads.store = Some(store);
                 downloads.refresh();
             }
         }
         Ok(downloads)
+    }
+
+    pub(super) fn for_source(&self, settings: &crate::settings::Settings, bridge: &Bridge) -> Self {
+        let mut downloads = Self {
+            store: None,
+            snap: Arc::default(),
+            pending_pins: Vec::new(),
+            base: self.base.clone(),
+            account: settings.account_id(),
+            owner: settings.account(),
+            generation: 0,
+            opening: false,
+            deferred: Vec::new(),
+            moving: None,
+            open: self.open.clone(),
+            album_pins: Default::default(),
+        };
+        downloads.open_in_background(settings.offline_limit_gb.map(|gb| gb * 1_000_000_000), None, bridge);
+        downloads
+    }
+
+    pub(super) fn remove_files(&mut self, bridge: &Bridge) {
+        let store = self.store.take();
+        self.snap = Arc::default();
+        self.pending_pins.clear();
+        self.deferred.clear();
+        self.opening = false;
+        if let Some(store) = store {
+            let path = store.dir().to_path_buf();
+            bridge.offline_job(move |_| {
+                drop(store);
+                let _ = std::fs::remove_dir_all(path);
+            });
+        }
     }
 
     /// The store folder for `account` under `base`. Before any sign-in there is
@@ -195,11 +246,12 @@ impl Downloads {
     /// Opens `account`'s store in place of the current one (another server or
     /// user signed in), in the background (see [`open_in_background`](Self::open_in_background)).
     /// Its pins and files stay apart from everyone else's.
-    pub(super) fn switch_account(&mut self, account: Option<u32>, limit: Option<u64>, bridge: &Bridge) {
-        if account == self.account && (self.store.is_some() || self.opening) {
+    pub(super) fn switch_account(&mut self, account: Option<u32>, owner: Option<AccountId>, limit: Option<u64>, bridge: &Bridge) {
+        if account == self.account && owner == self.owner && (self.store.is_some() || self.opening) {
             return;
         }
         self.account = account;
+        self.owner = owner;
         self.open_in_background(limit, None, bridge);
     }
 
@@ -214,7 +266,7 @@ impl Downloads {
         self.pending_pins.clear();
         self.snap = Arc::default();
         let old = self.store.take();
-        let (generation, base, account, open) = (self.generation, self.base.clone(), self.account, self.open.clone());
+        let (generation, base, account, owner, open) = (self.generation, self.base.clone(), self.account, self.owner, self.open.clone());
         bridge.offline_job(move |b| {
             // First, as it may be the same folder's: this waits for its last save.
             drop(old);
@@ -231,7 +283,7 @@ impl Downloads {
                 }
                 b.post(OfflineMsg::Moved(moved.map(drop).map_err(|e| e.to_string())));
             }
-            let store = Self::dir_for(&base, account).map_err(anyhow::Error::from).and_then(|dir| open(dir, limit));
+            let store = Self::dir_for(&base, account).map_err(anyhow::Error::from).and_then(|dir| open(dir, limit, owner));
             b.post(OfflineMsg::Store { generation, store: store.map_err(|e| format!("{e:#}")) });
         });
     }
@@ -252,9 +304,13 @@ impl Downloads {
         Ok(true)
     }
 
-    /// The finished file for track `id`, if there is one.
-    pub fn local_path(&self, id: &str) -> Option<PathBuf> {
-        self.store.as_ref()?.local_path(id)
+    /// The finished file for this account's track, if there is one.
+    pub fn local_path(&self, key: &TrackKey) -> Option<PathBuf> {
+        self.tracks().local_path(key)
+    }
+
+    pub fn tracks(&self) -> OfflineTracks<'_> {
+        OfflineTracks { account: self.owner, snap: &self.snap, store: self.store.as_ref() }
     }
 
     /// Takes in what changed since the last frame.
@@ -323,14 +379,139 @@ impl Downloads {
     }
 }
 
-/// What the offline store needs to download `t`.
-pub fn track_ref(t: &Track) -> TrackRef {
-    TrackRef::new(t.id.clone(), t.suffix.clone(), t.size)
+/// The qualified key keeps files apart across sources.
+pub fn offline_name(key: &TrackKey) -> std::borrow::Cow<'_, str> {
+    std::borrow::Cow::Owned(key.to_string())
+}
+
+/// The only track boundary into the string-based store. Its account is known
+/// even when the server is absent, and a foreign key never names a local file.
+pub struct OfflineTracks<'a> {
+    pub account: Option<AccountId>,
+    pub snap: &'a offline::Snapshot,
+    pub store: Option<&'a OfflineStore>,
+}
+
+impl<'a> OfflineTracks<'a> {
+    /// Resolves a stored name only inside the account that owns this store.
+    pub fn key(&self, name: &str) -> Option<TrackKey> {
+        TrackKey::parse(name).ok().filter(|key| Some(key.account) == self.account)
+    }
+
+    fn name<'k>(&self, key: &'k TrackKey) -> Option<std::borrow::Cow<'k, str>> {
+        (Some(key.account) == self.account).then(|| offline_name(key))
+    }
+
+    pub fn track(&self, key: &TrackKey) -> Option<&'a offline::TrackState> {
+        self.snap.track(&self.name(key)?)
+    }
+
+    pub fn is_done(&self, key: &TrackKey) -> bool {
+        self.name(key).is_some_and(|name| self.snap.is_done(&name))
+    }
+
+    pub fn local_path(&self, key: &TrackKey) -> Option<PathBuf> {
+        self.store?.local_path(&self.name(key)?)
+    }
+
+    pub fn pin(&self, key: &TrackKey) -> Option<Pin> {
+        Some(Pin::Track(self.name(key)?.into_owned()))
+    }
+
+    pub fn track_ref(&self, key: &TrackKey, t: &Track) -> Option<TrackRef> {
+        Some(TrackRef::new(self.name(key)?.into_owned(), t.suffix.clone(), t.size))
+    }
 }
 
 impl OndApp {
     /// Applies a download action. One that needs the store waits while it opens.
     pub(super) fn apply_offline(&mut self, action: OfflineAction) {
+        if !self.multi.bridges.is_empty() {
+            match &action {
+                OfflineAction::Pause(_) | OfflineAction::Retry | OfflineAction::SetLimit(_) if !self.data.album_copies.is_empty() => {
+                    let accounts: Vec<_> =
+                        self.session.accounts.keys().copied().filter(|a| self.session.scope.includes(*a) && self.downloads_for(*a).is_some()).collect();
+                    for account in accounts {
+                        let own = match &action {
+                            OfflineAction::Pause(on) => OfflineAction::Pause(*on),
+                            OfflineAction::SetLimit(limit) => OfflineAction::SetLimit(*limit),
+                            _ => OfflineAction::Retry,
+                        };
+                        self.with_source(account, |app| app.apply_offline_for_source(own));
+                    }
+                    return;
+                }
+                OfflineAction::Unpin(Pin::Album(id)) if self.data.copies_of_album(id).len() > 1 => {
+                    return self.apply_offline(OfflineAction::Keep(Keep::Album(id.clone()), false));
+                }
+                OfflineAction::Unpin(Pin::Track(id))
+                    if self.data.copies_of_track(id).len() > 1
+                        || self.data.track_copy(id).is_some_and(|t| self.data.copies_of_album(&t.album_id).len() > 1) =>
+                {
+                    if let Some(track) = self.data.track_copy(id).cloned() {
+                        self.apply_offline(OfflineAction::Keep(Keep::Tracks(vec![track]), false));
+                    }
+                    return;
+                }
+                OfflineAction::Keep(Keep::Album(id), on) if self.data.copies_of_album(id).len() > 1 => {
+                    let tracks = self.data.tracks.album(self.data.album_lead(id)).map(|s| s.to_vec()).unwrap_or_default();
+                    let mut groups = std::collections::BTreeMap::<AccountId, Vec<Track>>::new();
+                    for track in tracks {
+                        let keys = if *on {
+                            self.data.preferred_track(&track.id, self.prefs_now().prefer_copy).into_iter().collect()
+                        } else {
+                            self.data.copies_of_track(&track.id)
+                        };
+                        for key in keys {
+                            if let Some(track) = self.data.track_copy(&key.to_string()) {
+                                groups.entry(key.account).or_default().push(track.clone());
+                            }
+                        }
+                    }
+                    for (account, tracks) in groups {
+                        self.with_source(account, |app| app.apply_offline_for_source(OfflineAction::Keep(Keep::Tracks(tracks), *on)));
+                    }
+                    if !on {
+                        for album in self.data.copies_of_album(id) {
+                            self.with_source(album.account, |app| app.apply_offline_for_source(OfflineAction::Unpin(Pin::Album(album.to_string()))));
+                        }
+                    }
+                    return;
+                }
+                OfflineAction::Keep(Keep::Tracks(tracks), on) => {
+                    let mut groups = std::collections::BTreeMap::<AccountId, Vec<Track>>::new();
+                    for track in tracks {
+                        let copies = if *on {
+                            self.data.preferred_track(&track.id, self.prefs_now().prefer_copy).into_iter().collect()
+                        } else {
+                            self.data.copies_of_track(&track.id)
+                        };
+                        for key in copies {
+                            if self.session.get(key.account).is_some_and(|s| s.source_caps().downloads) {
+                                let copy = self.data.track_copy(&key.to_string()).unwrap_or(track).clone();
+                                groups.entry(key.account).or_default().push(copy);
+                            }
+                        }
+                    }
+                    for (account, tracks) in groups {
+                        self.with_source(account, |app| app.apply_offline_for_source(OfflineAction::Keep(Keep::Tracks(tracks), *on)));
+                    }
+                    return;
+                }
+                OfflineAction::Keep(Keep::Playlist(id), on) if id.starts_with("ond:") => {
+                    let accounts: Vec<_> = self.session.accounts.iter().filter(|(_, s)| s.source_caps().downloads).map(|(a, _)| *a).collect();
+                    for account in accounts {
+                        self.with_source(account, |app| app.apply_offline_for_source(OfflineAction::Keep(Keep::Playlist(id.clone()), *on)));
+                    }
+                    return;
+                }
+                _ => {}
+            }
+        }
+        self.apply_offline_for_source(action);
+    }
+
+    fn apply_offline_for_source(&mut self, action: OfflineAction) {
         if self.downloads.store.is_none() && action.needs_store() {
             if self.downloads.opening {
                 self.downloads.deferred.push(action);
@@ -371,8 +552,8 @@ impl OndApp {
             }
             OfflineMsg::Store { generation, store } => match self.downloads.opened(generation, store, &self.bridge) {
                 Ok(true) => {
-                    if let Some(client) = self.session.live().cloned() {
-                        self.connect_downloads(&client);
+                    if let Some(source) = self.session.live().cloned() {
+                        self.connect_downloads(&source);
                     }
                     // Download actions taken while it opened.
                     self.actions.extend(self.downloads.deferred.drain(..).map(Action::Offline));
@@ -415,6 +596,15 @@ impl OndApp {
     /// Takes in the store's changes since the last frame. A download that
     /// finished may let what's next play from disk, or play at all.
     pub(super) fn poll_downloads(&mut self) {
+        let mut changed = false;
+        for downloads in self.multi.downloads.values_mut() {
+            let version = downloads.snap.version;
+            downloads.refresh();
+            changed |= version != downloads.snap.version;
+        }
+        if changed {
+            self.sync_next();
+        }
         if let Some(snap) = self.downloads.store.as_ref().map(|s| s.snapshot())
             && snap.version != self.downloads.snap.version
         {
@@ -431,14 +621,31 @@ impl OndApp {
     /// Hands the offline store the server, and refetches pinned playlists so
     /// what was added to them downloads. Nothing while the store is opening:
     /// it gets the same once it's open.
-    pub(super) fn connect_downloads(&mut self, client: &Client) {
+    pub(super) fn connect_downloads(&mut self, source: &Src) {
         let Some(store) = &self.downloads.store else { return };
-        let url = client.clone();
-        store.set_source(Some(Arc::new(move |id: &str| url.stream_url(id).to_string())));
+        if self.downloads.owner != Some(source.account()) {
+            return;
+        }
+        let url = source.clone();
+        store.set_source(source.capabilities().downloads.then(|| {
+            Arc::new(move |id: &str| {
+                let key = TrackKey::parse(id).expect("downloads have qualified keys");
+                assert_eq!(key.account, url.account());
+                url.download_url(&key.item).expect("a downloadable source supplies track URLs")
+            }) as offline::UrlFn
+        }));
+        let mut ond = false;
         for p in &self.downloads.snap.pins {
             if let Pin::Playlist(id) = &p.pin {
-                self.bridge.open_playlist(Some(client.clone()), id.clone());
+                if id.starts_with("ond:") {
+                    ond = true;
+                } else {
+                    self.bridge.open_playlist(Some(source.clone()), id.clone());
+                }
             }
+        }
+        if ond {
+            self.refresh_ond_playlists();
         }
     }
 
@@ -458,7 +665,10 @@ impl OndApp {
         // known yet, and none waits (opening clears `pending_pins`).
         let Some(store) = self.downloads.store.clone() else { return };
         let label = self.pin_label(&pin);
-        let refs = || tracks.iter().map(track_ref).collect::<Vec<_>>();
+        let Some(account) = self.session.account().filter(|a| Some(*a) == self.downloads.owner) else { return };
+        let snapshot = self.downloads.snap.clone();
+        let adapter = OfflineTracks { account: self.downloads.owner, snap: &snapshot, store: Some(&store) };
+        let refs = || tracks.iter().filter_map(|t| adapter.track_ref(&crate::source::identity::key(account, &t.id), t)).collect::<Vec<_>>();
         if let Some(at) = self.downloads.pending_pins.iter().position(|(_, p)| p == &pin) {
             self.downloads.pending_pins.remove(at);
             store.pin(pin, label, refs());
@@ -475,7 +685,9 @@ impl OndApp {
         match pin {
             Pin::Album(id) => self.data.album(id).map(|a| a.name.clone()).unwrap_or_default(),
             Pin::Playlist(id) => self.data.playlists.iter().find(|p| &p.id == id).map(|p| p.name.clone()).unwrap_or_default(),
-            Pin::Track(id) => self.data.track(id).map(|t| t.title.clone()).unwrap_or_default(),
+            Pin::Track(id) => {
+                self.data.track(id).or_else(|| TrackKey::parse(id).ok().and_then(|k| self.data.track(&k.item))).map(|t| t.title.clone()).unwrap_or_default()
+            }
             Pin::Book(_) => String::new(),
         }
     }
@@ -483,22 +695,35 @@ impl OndApp {
     /// Runs only with the store open (see `apply_offline`, which holds it back while one opens).
     pub(super) fn keep_offline(&mut self, what: Keep, on: bool) {
         let Some(store) = self.downloads.store.clone() else { return };
+        let Some(account) = self.session.account().filter(|a| Some(*a) == self.downloads.owner) else { return };
+        let adapter = self.downloads.tracks();
+        let track_ref = |t: &Track| adapter.track_ref(&crate::source::identity::key(account, &t.id), t);
         // An album or playlist is pinned whole, once its track list is known.
         let (key, pin, refs) = match what {
             Keep::Album(id) => {
-                let refs = self.data.tracks.album(&id).map(|t| t.iter().map(track_ref).collect::<Vec<_>>());
+                let refs = self.data.tracks.album(&id).map(|t| t.iter().filter_map(track_ref).collect::<Vec<_>>());
                 (ListKey::Album(id.clone()), Pin::Album(id), refs)
             }
             Keep::Playlist(id) => {
-                let refs = self.data.playlist_tracks.get(&id).map(|t| t.iter().map(track_ref).collect::<Vec<_>>());
+                let refs = self.data.playlist_tracks.get(&id).map(|t| t.iter().filter_map(track_ref).collect::<Vec<_>>());
                 (ListKey::Playlist(id.clone()), Pin::Playlist(id), refs)
             }
             // One pin per song, saved together: a big selection doesn't stall.
             Keep::Tracks(tracks) => {
                 if on {
-                    store.pin_many(tracks.iter().map(|t| (Pin::Track(t.id.clone()), t.title.clone(), vec![track_ref(t)])).collect());
+                    store.pin_many(
+                        tracks
+                            .iter()
+                            .filter_map(|t| Some((adapter.pin(&crate::source::identity::key(account, &t.id))?, t.title.clone(), vec![track_ref(t)?])))
+                            .collect(),
+                    );
                 } else {
-                    store.unpin_many(&tracks.iter().map(|t| Pin::Track(t.id.clone())).collect::<Vec<_>>());
+                    let ids: Vec<_> = tracks.iter().map(|t| crate::source::identity::key(account, &t.id).to_string()).collect();
+                    if tracks.iter().any(|t| self.data.copies_of_track(&t.id).len() > 1 || self.data.copies_of_album(&t.album_id).len() > 1) {
+                        store.unpin_tracks(&ids);
+                    } else {
+                        store.unpin_many(&tracks.iter().filter_map(|t| adapter.pin(&crate::source::identity::key(account, &t.id))).collect::<Vec<_>>());
+                    }
                 }
                 self.downloads.refresh();
                 return;
@@ -510,8 +735,9 @@ impl OndApp {
             None => {
                 self.wait_to_pin(key.clone(), pin);
                 match key {
-                    ListKey::Album(id) => self.bridge.open_album(self.session.client.clone(), id),
-                    ListKey::Playlist(id) => self.bridge.open_playlist(self.session.client.clone(), id),
+                    ListKey::Album(id) => self.bridge.open_album(self.session.source.clone(), id),
+                    ListKey::Playlist(id) if id.starts_with("ond:") => self.refresh_ond_playlists(),
+                    ListKey::Playlist(id) => self.bridge.open_playlist(self.session.source.clone(), id),
                     ListKey::Artist(_) => {}
                 }
             }
@@ -531,10 +757,14 @@ impl OndApp {
         let base = &self.downloads.base;
         let start = base.parent().unwrap_or(base).to_owned();
         let bridge = self.bridge.clone();
-        crate::folder::pick("Choose where to keep downloaded music", &start, move |chosen| {
-            if let Some(dir) = chosen {
-                bridge.post(OfflineMsg::Folder(dir));
-            }
-        });
+        (self.pick_folder)(
+            "Choose where to keep downloaded music",
+            &start,
+            Box::new(move |chosen| {
+                if let Some(dir) = chosen {
+                    bridge.post(OfflineMsg::Folder(dir));
+                }
+            }),
+        );
     }
 }

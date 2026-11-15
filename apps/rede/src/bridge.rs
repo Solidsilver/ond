@@ -12,8 +12,9 @@ use crate::settings::{Account, KnownLibrary, Paths, Settings};
 use crate::sync::{self, Outcome};
 use crate::tokens::Keeper;
 use abs::{AuthError, Version};
+use accounts::ItemKey;
 use shelf::Shelf;
-use sources::{AbsSource, Item, ItemKey, ItemSummary, Source};
+use sources::{AbsSource, Item, ItemSummary, Source};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::Sender;
@@ -28,11 +29,15 @@ pub enum Msg {
         session: u64,
         event: OfflineMsg,
     },
-    Library(LibraryMsg),
+    Library {
+        session: u64,
+        event: LibraryMsg,
+    },
     /// The listening the Stats page counts: this computer's log, and the
     /// server's history or why it couldn't be had (`None`: not asked, with no
     /// server to ask).
     Stats {
+        session: u64,
         log: Vec<shelf::Logged>,
         history: Option<Result<Vec<sources::Listen>, Failure>>,
     },
@@ -62,7 +67,10 @@ pub enum Msg {
         bytes: Vec<u8>,
     },
     /// Something the user asked for failed.
-    Error(Failure),
+    Error {
+        session: u64,
+        error: Failure,
+    },
 }
 
 /// Download work belongs to the same sign-in generation as the shelf.
@@ -151,12 +159,6 @@ impl From<AccountMsg> for Msg {
     }
 }
 
-impl From<LibraryMsg> for Msg {
-    fn from(m: LibraryMsg) -> Self {
-        Msg::Library(m)
-    }
-}
-
 /// What the player decodes, sent with every play session: without it, or
 /// without `forceDirectPlay`, Audiobookshelf transcodes to HLS instead of
 /// handing over the files. The engine decodes these formats directly.
@@ -164,6 +166,8 @@ const MIME_TYPES: [&str; 7] = ["audio/mpeg", "audio/mp4", "audio/aac", "audio/fl
 
 /// Wakes the UI so it reads what was sent (a repaint, in the app).
 pub type Notify = Arc<dyn Fn() + Send + Sync>;
+
+type TokenLoader = Arc<dyn Fn(&Account) -> Option<abs::Tokens> + Send + Sync>;
 
 #[derive(Clone)]
 pub struct Bridge {
@@ -173,6 +177,7 @@ pub struct Bridge {
     notify: Notify,
     /// Persists the tokens the client rotates, off the task that rotated them.
     keeper: Keeper,
+    load_tokens: TokenLoader,
     /// Where each account's shelf lives.
     paths: Arc<Paths>,
     /// Bumped on sign-out: work for an older session stops and its results are
@@ -185,9 +190,25 @@ pub struct Bridge {
     /// Opens, source jobs and shutdowns share one queue, including accounts
     /// revisited before their old store has finished writing.
     download_jobs: Arc<std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
+    /// Open shelves keyed by path so a rapid sign-out/re-sign-in reuses any
+    /// handle still dropping instead of tripping redb's opener lock.
+    shelves: Arc<std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, std::sync::Weak<Shelf>>>>,
+    /// Active listening-worker teardown signals awaited before reopening a shelf.
+    finishing: Arc<std::sync::Mutex<Vec<tokio::sync::watch::Receiver<bool>>>>,
     /// Set on a copy made by [`scoped`](Self::scoped): the session its work
     /// belongs to. Once that session ends, the copy's messages are dropped.
     scope: Option<u64>,
+    /// Bumped by each sign-in attempt (checking a server, starting a browser
+    /// sign-in) and by a cancel: an older attempt's answer is dropped. It's
+    /// apart from `session` so that an attempt beside a live account leaves
+    /// that account's work alone.
+    attempts: Arc<AtomicU64>,
+    /// Set on a copy working for one attempt: once a newer one starts, or
+    /// it's cancelled, the copy's messages are dropped.
+    attempt: Option<u64>,
+    /// Set on a copy made by [`beside`](Self::beside): the sign-in it starts
+    /// is beside a live account, whose session and login it leaves alone.
+    beside: bool,
 }
 
 /// Serializes blocking keyring operations. A delayed cleanup may remove an
@@ -205,13 +226,31 @@ impl Bridge {
             tx,
             notify,
             keeper,
+            load_tokens: Arc::new(|account| Settings::default().load_tokens(account)),
             paths,
             session: Arc::default(),
             pass: Arc::default(),
             download_pass: Arc::default(),
             download_jobs: Arc::default(),
+            shelves: Arc::default(),
+            finishing: Arc::default(),
             scope: None,
+            attempts: Arc::default(),
+            attempt: None,
+            beside: false,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn use_token_store<S>(&mut self, store: Arc<S>)
+    where
+        S: Send + Sync + 'static,
+        Arc<S>: crate::tokens::TokenStore + crate::tokens::TokenLoad,
+    {
+        use crate::tokens::TokenLoad;
+        let reader = store.clone();
+        self.load_tokens = Arc::new(move |account| reader.load(account));
+        self.keeper = Keeper::with_store(store);
     }
 
     #[cfg(test)]
@@ -264,7 +303,7 @@ impl Bridge {
         self.download_job(move || store.clear());
     }
 
-    pub fn open_downloads(&self, account: sources::AccountId, limit: Option<u64>, stream_dir: std::path::PathBuf, target: crate::downloads::Store) {
+    pub fn open_downloads(&self, account: accounts::AccountId, limit: Option<u64>, stream_dir: std::path::PathBuf, target: crate::downloads::Store) {
         let this = self.scoped();
         let base = self.paths.shelves.with_file_name("downloads");
         let rt = self.rt.clone();
@@ -436,9 +475,55 @@ impl Bridge {
         Self { scope: Some(session), ..self.clone() }
     }
 
-    /// False once the session this copy works for has ended.
+    /// False once the session this copy works for has ended, or the
+    /// sign-in attempt it works for was overtaken or cancelled.
     fn current(&self) -> bool {
-        self.scope.is_none_or(|s| self.live(s))
+        self.scope.is_none_or(|s| self.live(s)) && self.attempt.is_none_or(|a| self.attempts.load(Ordering::Acquire) == a)
+    }
+
+    /// A copy whose sign-in steps run beside the live account when `live`:
+    /// adding an account while another is in view (Add source…). A new
+    /// attempt then doesn't end the session, the login is kept beside the
+    /// live one's, and a cancel forgets only the attempt. Without a live
+    /// account, sign-in works as it always has.
+    pub fn beside(&self, live: bool) -> Self {
+        Self { beside: live, ..self.clone() }
+    }
+
+    /// A copy for a new sign-in attempt, which an older one's answers no
+    /// longer count against. Without a live account beside it, the session
+    /// ends too, as signing in has always done.
+    fn new_attempt(&self) -> Self {
+        if !self.beside {
+            self.end_session();
+        }
+        let attempt = self.attempts.fetch_add(1, Ordering::AcqRel) + 1;
+        Self { scope: Some(self.session()), attempt: Some(attempt), ..self.clone() }
+    }
+
+    /// A copy for the next step of the attempt under way.
+    fn attempt_scoped(&self) -> Self {
+        Self { scope: Some(self.scope.unwrap_or_else(|| self.session())), attempt: Some(self.attempts.load(Ordering::Acquire)), ..self.clone() }
+    }
+
+    /// Starts the login a sign-in step makes: beside the live one, or in
+    /// its place.
+    fn start_login(&self, account: Account) {
+        if self.beside { self.keeper.try_account(account) } else { self.keeper.use_account(account) }
+    }
+
+    /// An account signed in: its login, if it was an attempt beside the
+    /// live one, is the live one now.
+    pub fn adopt_login(&self) {
+        self.keeper.adopt();
+    }
+
+    fn library(&self, event: LibraryMsg) {
+        self.send(Msg::Library { session: self.scope.unwrap_or_else(|| self.session()), event });
+    }
+
+    fn error(&self, error: Failure) {
+        self.send(Msg::Error { session: self.scope.unwrap_or_else(|| self.session()), error });
     }
 
     fn send(&self, msg: impl Into<Msg>) {
@@ -453,14 +538,63 @@ impl Bridge {
     /// has none (or that fails) sends the app to the sign-in form; a server that
     /// has forgotten them turns up as a signed-out sync.
     pub fn start(&self, account: Account) {
-        let session = self.session();
+        self.start_after(self.session(), account);
+    }
+
+    /// Ends the current session and opens `account` once the previous
+    /// account's listening worker has flushed pending progress and released its
+    /// shelf.
+    pub fn switch_account(&self, account: Account, finished: Option<tokio::sync::oneshot::Receiver<()>>) {
+        self.end_session();
+        self.track_finish(finished);
+        self.start_after(self.session(), account);
+    }
+
+    /// Records an in-flight listening-worker teardown so the next session open
+    /// or account purge waits for it to finish flushing and closing.
+    pub fn track_finish(&self, finished: Option<tokio::sync::oneshot::Receiver<()>>) {
+        let Some(finished) = finished else { return };
+        let (tx, rx) = tokio::sync::watch::channel(false);
+        {
+            let mut list = self.finishing.lock().unwrap_or_else(|e| e.into_inner());
+            list.retain(|existing| !*existing.borrow());
+            list.push(rx);
+        }
+        self.rt.spawn(async move {
+            let _ = finished.await;
+            let _ = tx.send(true);
+        });
+    }
+
+    async fn wait_finishing(&self) {
+        let pending = {
+            let mut list = self.finishing.lock().unwrap_or_else(|e| e.into_inner());
+            list.retain(|existing| !*existing.borrow());
+            list.clone()
+        };
+        if pending.is_empty() {
+            return;
+        }
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            for mut rx in pending {
+                let _ = rx.wait_for(|done| *done).await;
+            }
+        })
+        .await;
+    }
+
+    fn start_after(&self, session: u64, account: Account) {
         let this = self.scoped_to(session);
         self.keeper.use_account(account.clone());
         let hook = self.keeper.hook();
+        let load_tokens = self.load_tokens.clone();
         self.rt.spawn(async move {
+            this.wait_finishing().await;
+            if !this.live(session) {
+                return;
+            }
             let wanted = account.clone();
-            let settings = Settings::default();
-            let tokens = tokio::task::spawn_blocking(move || settings.load_tokens(&wanted)).await.ok().flatten();
+            let tokens = tokio::task::spawn_blocking(move || load_tokens(&wanted)).await.ok().flatten();
             if !this.live(session) {
                 return;
             }
@@ -479,8 +613,7 @@ impl Bridge {
 
     /// Discovers authentication before showing credential controls.
     pub fn server_status(&self, account: Account) {
-        self.end_session();
-        let this = self.scoped();
+        let this = self.new_attempt();
         self.rt.spawn(async move {
             let session = this.scope.unwrap();
             let result = async {
@@ -506,8 +639,7 @@ impl Bridge {
     }
 
     pub fn begin_openid(&self, account: Account, warning: Option<String>) {
-        self.end_session();
-        let this = self.scoped();
+        let this = self.new_attempt();
         self.rt.spawn(async move {
             let session = this.scope.unwrap();
             let result = async {
@@ -564,8 +696,13 @@ impl Bridge {
     }
 
     pub fn cancel_login(&self) {
-        self.end_session();
-        self.keeper.cancel_login();
+        self.attempts.fetch_add(1, Ordering::AcqRel);
+        if self.beside {
+            self.keeper.cancel_attempt();
+        } else {
+            self.end_session();
+            self.keeper.cancel_login();
+        }
     }
 
     pub fn clear_openid(&self) {
@@ -580,7 +717,7 @@ impl Bridge {
     }
 
     pub fn complete_openid(&self, pending: crate::openid::Pending, callback: String) {
-        let this = self.scoped();
+        let this = self.attempt_scoped();
         let account = pending.account;
         self.rt.spawn(async move {
             let session = this.scope.unwrap();
@@ -604,8 +741,8 @@ impl Bridge {
 
     /// The UI has identified the account and accepted this session's result.
     pub fn accept_openid(&self, account: Account, client: abs::Client, tokens: abs::Tokens, warning: Option<String>) {
-        let this = self.scoped();
-        self.keeper.use_account(account.clone());
+        let this = self.attempt_scoped();
+        self.start_login(account.clone());
         let hook = self.keeper.hook();
         hook(abs::AuthEvent::Tokens(tokens));
         client.set_auth_hook(hook);
@@ -631,9 +768,9 @@ impl Bridge {
     /// first: Rede needs 2.26 (refresh tokens) and warns below 2.36 (the
     /// refresh token was accepted as an access token until then).
     pub fn sign_in(&self, account: Account, password: String) {
-        let session = self.session();
-        let this = self.scoped_to(session);
-        self.keeper.use_account(account.clone());
+        let this = self.attempt_scoped();
+        let session = this.scope.unwrap_or_default();
+        self.start_login(account.clone());
         let hook = self.keeper.hook();
         self.rt.spawn(async move {
             let failed = |error: String| Msg::Account(AccountMsg::SignInFailed { session, error });
@@ -657,9 +794,10 @@ impl Bridge {
             if let Err(e) = client.login(&account.username, &password).await {
                 return this.send(failed(sign_in_error(&e)));
             }
-            if !this.live(session) {
-                // Signed out while the password was on its way. The tokens the
-                // sign-in just got are for an account nobody wants.
+            if !this.current() {
+                // Signed out or cancelled while the password was on its way.
+                // The tokens the sign-in just got are for an account nobody
+                // wants.
                 let _ = client.logout().await;
                 return;
             }
@@ -680,11 +818,11 @@ impl Bridge {
         // A refresh from the old client may still be in flight; its new pair
         // mustn't be written back over the sign-out.
         self.keeper.forget(account);
+        self.track_finish(finished);
         if let Some(source) = source {
+            let finisher = self.clone();
             self.rt.spawn(async move {
-                if let Some(finished) = finished {
-                    let _ = finished.await;
-                }
+                finisher.wait_finishing().await;
                 if let Err(e) = source.logout().await {
                     tracing::info!("ending the server login: {e}");
                 }
@@ -692,19 +830,56 @@ impl Bridge {
         }
     }
 
+    /// Removes an account's keyring entry, shelf and downloaded files. An
+    /// account that was in view is removed once its listening worker has
+    /// flushed and let its shelf go, and after its downloads have closed
+    /// (the deletion waits behind them in the downloads' queue).
+    pub fn purge_account(&self, account: Account) {
+        self.keeper.forget(account.clone());
+        let this = self.clone();
+        self.rt.spawn(async move {
+            this.wait_finishing().await;
+            let paths = this.paths.clone();
+            this.download_job(move || {
+                if let Err(e) = paths.purge_account(&account) {
+                    tracing::warn!("removing account files: {e}");
+                }
+            });
+        });
+    }
+
+    /// Forgets an account's saved sign-in, for one not in view: nothing of
+    /// its runs to stop.
+    pub fn forget_tokens(&self, account: Account) {
+        self.keeper.forget(account);
+    }
+
+    fn open_account_shelf(&self, path: &std::path::Path) -> Result<Arc<Shelf>, String> {
+        let mut shelves = self.shelves.lock().unwrap_or_else(|e| e.into_inner());
+        shelves.retain(|_, w| w.strong_count() > 0);
+        if let Some(existing) = shelves.get(path).and_then(std::sync::Weak::upgrade) {
+            return Ok(existing);
+        }
+        let shelf = Arc::new(open_shelf(path)?);
+        shelves.insert(path.to_path_buf(), Arc::downgrade(&shelf));
+        Ok(shelf)
+    }
+
     /// Opens the shelf and tells the app the account is ready. The shelf is
     /// this account's own file, so a book's place in it never collides with
     /// another account's.
     async fn ready(&self, session: u64, account: Account, client: abs::Client, warning: Option<String>) {
         let this = self.scoped_to(session);
+        this.wait_finishing().await;
         if !this.current() {
             let _ = client.logout().await;
             return;
         }
         let path = this.paths.shelf(&account);
-        let opened = tokio::task::spawn_blocking(move || open_shelf(&path)).await;
+        let opener = this.clone();
+        let opened = tokio::task::spawn_blocking(move || opener.open_account_shelf(&path)).await;
         let shelf = match opened {
-            Ok(Ok(shelf)) => Arc::new(shelf),
+            Ok(Ok(shelf)) => shelf,
             Ok(Err(e)) => return this.send(AccountMsg::SignInFailed { session, error: format!("Couldn't open this account's library: {e}") }),
             Err(e) => return this.send(AccountMsg::SignInFailed { session, error: format!("Couldn't open this account's library: {e}") }),
         };
@@ -725,7 +900,7 @@ impl Bridge {
                     Ok(Some(position)) => positions.push(position),
                     Ok(None) => {}
                     Err(e) => {
-                        this.send(Msg::Error(Failure::Local(format!("Couldn't read listening progress: {e}"))));
+                        this.error(Failure::Local(format!("Couldn't read listening progress: {e}")));
                         return;
                     }
                 }
@@ -755,7 +930,7 @@ impl Bridge {
                 Some(source) => Some(source.listening_history().await.map_err(Failure::from)),
                 None => None,
             };
-            this.send(Msg::Stats { log, history });
+            this.send(Msg::Stats { session: this.scope.expect("stats are scoped"), log, history });
         });
     }
 
@@ -764,8 +939,8 @@ impl Bridge {
     pub fn load_books(&self, shelf: Arc<Shelf>, libraries: Vec<KnownLibrary>) {
         let this = self.scoped();
         self.rt.spawn_blocking(move || match sync::stored_books(&shelf, &libraries) {
-            Ok(books) => this.send(LibraryMsg::Books(books)),
-            Err(e) => this.send(Msg::Error(e)),
+            Ok(books) => this.library(LibraryMsg::Books(books)),
+            Err(e) => this.error(e),
         });
     }
 
@@ -782,7 +957,7 @@ impl Bridge {
             }
             let outcome = sync::run(source.as_ref(), &shelf, sources::Stamp::from(std::time::SystemTime::now()), |n| {
                 if live() {
-                    this.send(LibraryMsg::SyncProgress(n));
+                    this.library(LibraryMsg::SyncProgress(n));
                 }
             })
             .await;
@@ -793,11 +968,11 @@ impl Bridge {
             if let Outcome::Done(report) = &outcome {
                 let libraries = report.libraries.clone();
                 match sync::stored_books(&shelf, &libraries) {
-                    Ok(books) => this.send(LibraryMsg::Books(books)),
-                    Err(e) => this.send(Msg::Error(e)),
+                    Ok(books) => this.library(LibraryMsg::Books(books)),
+                    Err(e) => this.error(e),
                 }
             }
-            this.send(LibraryMsg::SyncDone(outcome));
+            this.library(LibraryMsg::SyncDone(outcome));
         });
     }
 
@@ -808,7 +983,7 @@ impl Bridge {
         self.rt.spawn(async move {
             let (asked, stored) = (key.clone(), shelf.clone());
             match tokio::task::spawn_blocking(move || stored.item(&asked)).await {
-                Ok(Ok(Some(item))) => this.send(LibraryMsg::Book { key: key.clone(), item: Box::new(item) }),
+                Ok(Ok(Some(item))) => this.library(LibraryMsg::Book { key: key.clone(), item: Box::new(item) }),
                 Ok(Ok(None)) => {}
                 Ok(Err(e)) => tracing::warn!("reading a book from the shelf: {e}"),
                 Err(e) => tracing::warn!("reading a book from the shelf: {e}"),
@@ -826,9 +1001,9 @@ impl Bridge {
             let (saved, book) = (shelf.clone(), key.clone());
             let to_store = item.clone();
             match tokio::task::spawn_blocking(move || saved.set_details(&book, &to_store)).await {
-                Ok(Ok(())) => this.send(LibraryMsg::Book { key, item: Box::new(item) }),
-                Ok(Err(e)) => this.send(LibraryMsg::BookFailed { key, error: Failure::Local(format!("Couldn't save the book: {e}")) }),
-                Err(e) => this.send(LibraryMsg::BookFailed { key, error: Failure::Local(format!("Couldn't save the book: {e}")) }),
+                Ok(Ok(())) => this.library(LibraryMsg::Book { key, item: Box::new(item) }),
+                Ok(Err(e)) => this.library(LibraryMsg::BookFailed { key, error: Failure::Local(format!("Couldn't save the book: {e}")) }),
+                Err(e) => this.library(LibraryMsg::BookFailed { key, error: Failure::Local(format!("Couldn't save the book: {e}")) }),
             }
         });
     }
@@ -1138,12 +1313,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (_rt, bridge, rx, _keeper) = rig(dir.path());
         let scoped = bridge.scoped();
-        scoped.send(Msg::Error(Failure::Local("before".into())));
+        scoped.error(Failure::Local("before".into()));
         bridge.end_session();
-        scoped.send(Msg::Error(Failure::Local("after".into())));
+        scoped.error(Failure::Local("after".into()));
         // Copies of a copy keep the session they were made for.
-        scoped.scoped().send(Msg::Error(Failure::Local("after, again".into())));
-        let sent = rx.try_iter().filter_map(|m| if let Msg::Error(e) = m { Some(e.into_message()) } else { None }).collect::<Vec<_>>();
+        scoped.scoped().error(Failure::Local("after, again".into()));
+        let sent = rx.try_iter().filter_map(|m| if let Msg::Error { error, .. } = m { Some(error.into_message()) } else { None }).collect::<Vec<_>>();
         assert_eq!(sent, ["before"]);
     }
 
@@ -1290,5 +1465,31 @@ mod tests {
             drop(rt);
             assert_eq!(store.load().is_some(), newer);
         }
+    }
+
+    #[test]
+    fn purge_account_removes_tokens_shelf_and_downloads() {
+        let dir = tempfile::tempdir().unwrap();
+        let (rt, mut bridge, _rx, _keeper) = rig(dir.path());
+        let (forgotten, forgot) = channel();
+        let keeper = Keeper::with_store(TokenStore { forgotten });
+        bridge.keeper = keeper;
+
+        let doomed = account();
+        let paths = Paths { config_file: dir.path().join("settings.json"), shelves: dir.path().join("accounts"), art_cache: dir.path().join("art") };
+        std::fs::create_dir_all(&paths.shelves).unwrap();
+        std::fs::write(paths.shelf(&doomed), b"shelf").unwrap();
+        std::fs::create_dir_all(paths.downloads(&doomed)).unwrap();
+        std::fs::write(paths.downloads(&doomed).join("file.mp3"), b"audio").unwrap();
+
+        bridge.purge_account(doomed.clone());
+        forgot.recv_timeout(slack(WAIT)).expect("tokens are forgotten");
+        rt.block_on(async {
+            let deadline = Deadline::new();
+            while paths.shelf(&doomed).exists() || paths.downloads(&doomed).exists() {
+                assert!(!deadline.passed(), "timed out waiting for account purge");
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        });
     }
 }

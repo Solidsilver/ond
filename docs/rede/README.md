@@ -2,7 +2,7 @@
 
 Rede is a native audiobook player for [Audiobookshelf](https://www.audiobookshelf.org), built with Rust and egui. It shares Ond's audio engine and interface toolkit, with its own library and controls for books.
 
-**0.1.0-beta.1 is the first public beta, for macOS and Linux.** Expect rough edges. Keep your Audiobookshelf backups: Rede syncs listening progress, finished status and bookmarks with your server.
+**0.1.0-beta.2 is the second public beta, for macOS and Linux.** Expect rough edges. Keep your Audiobookshelf backups: Rede syncs listening progress, finished status and bookmarks with your server.
 
 ## What works
 
@@ -16,21 +16,21 @@ Rede is a native audiobook player for [Audiobookshelf](https://www.audiobookshel
 
 ## Install
 
-Download from the [Rede 0.1.0-beta.1 release](https://github.com/Solidsilver/ond/releases/tag/rede-v0.1.0-beta.1). Rede betas are marked as prereleases; the repository's latest stable release is Ond, the music player.
+Download from the [Rede 0.1.0-beta.2 release](https://github.com/Solidsilver/ond/releases/tag/rede-v0.1.0-beta.2). Rede betas are marked as prereleases; the repository's latest stable release is Ond, the music player.
 
 ### macOS
 
-Open `Rede-0.1.0-beta.1-macos-universal.dmg` and drag Rede to Applications. The universal app runs on Apple silicon and Intel, on macOS 11 or later. A zip is also available.
+Open `Rede-0.1.0-beta.2-macos-universal.dmg` and drag Rede to Applications. The universal app runs on Apple silicon and Intel, on macOS 11 or later. A zip is also available.
 
 Release builds use the same Developer ID signing and Apple notarization setup as Ond. Locally built bundles are ad-hoc signed unless signing credentials are supplied.
 
 ### Linux
 
-Choose `Rede-0.1.0-beta.1-linux-x86_64.tar.gz` for an Intel/AMD PC, or `Rede-0.1.0-beta.1-linux-aarch64.tar.gz` for ARM64.
+Choose `Rede-0.1.0-beta.2-linux-x86_64.tar.gz` for an Intel/AMD PC, or `Rede-0.1.0-beta.2-linux-aarch64.tar.gz` for ARM64.
 
 ```sh
-tar xf Rede-0.1.0-beta.1-linux-*.tar.gz
-cd Rede-0.1.0-beta.1-linux-*/
+tar xf Rede-0.1.0-beta.2-linux-*.tar.gz
+cd Rede-0.1.0-beta.2-linux-*/
 ./install.sh                 # installs under ~/.local
 # or: sudo ./install.sh /usr/local
 ```
@@ -47,7 +47,7 @@ Enter your Audiobookshelf server address, then sign in. Audiobookshelf 2.26 or n
 
 For OpenID, allow `rede://oauth` in your server's mobile redirect URIs. Rede can fall back to `audiobookshelf://oauth`, but macOS may ask which app should open that shared scheme. Launch the installed app bundle, not `cargo run`, to receive browser redirects.
 
-There is one signed-in account at a time. Local audiobook folders, podcasts, Windows bundles and a mixed multi-account library are not part of this beta. Output follows your system's selected device; choose another device in system settings. Rede does not check for updates yet; download later betas from the releases page.
+You can sign in to more than one account and switch between them from the foot of the sidebar; one is shown at a time. Local audiobook folders, podcasts, Windows bundles and a merged multi-account library are not part of this beta. Output follows your system's selected device; choose another device in system settings. Rede does not check for updates yet; download later betas from the releases page.
 
 ## Build
 

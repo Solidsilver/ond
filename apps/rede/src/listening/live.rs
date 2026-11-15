@@ -44,7 +44,7 @@ async fn a_real_book_plays_twenty_seconds_and_leaves_no_progress() {
     let before = client.progress().await.unwrap_or_else(|_| panic!("initial progress read failed"));
     assert!(before.is_empty(), "the live test account must start with no progress");
     let source = Arc::new(sources::AbsSource::new(
-        sources::AccountId::new(),
+        accounts::AccountId::new(),
         client.clone(),
         ["audio/mpeg", "audio/mp4", "audio/aac", "audio/flac", "audio/ogg", "audio/webm", "audio/x-matroska"].map(String::from).to_vec(),
     ));

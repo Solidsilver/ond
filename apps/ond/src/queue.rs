@@ -6,6 +6,8 @@
 //! and "add to queue" put them, and what "play now" does with them, follow
 //! [`QueuePrefs`].
 
+use crate::source::TrackKey;
+use accounts::AccountId;
 use chrono::NaiveTime;
 use library::Track;
 use serde::{Deserialize, Serialize};
@@ -224,6 +226,7 @@ impl Source {
 pub struct Item {
     /// Unique within the queue, so the same track can be queued twice.
     pub uid: u64,
+    pub key: TrackKey,
     pub track: Track,
     pub source: Source,
     /// Queued with "play next" (for [`NextAt::AfterNext`]).
@@ -277,13 +280,27 @@ pub struct Queue {
 }
 
 impl Queue {
-    fn item(&mut self, track: Track, source: Source) -> Item {
+    fn item(&mut self, key: TrackKey, track: Track, source: Source) -> Item {
         self.next_uid += 1;
-        Item { uid: self.next_uid, track, source, next: false }
+        Item { uid: self.next_uid, key, track, source, next: false }
     }
 
-    fn items(&mut self, tracks: Vec<Track>, source: &Source) -> Vec<Item> {
-        tracks.into_iter().map(|t| self.item(t, source.clone())).collect()
+    fn items(&mut self, account: AccountId, tracks: Vec<Track>, source: &Source) -> Vec<Item> {
+        tracks.into_iter().map(|t| self.item(crate::source::identity::key(account, &t.id), t, source.clone())).collect()
+    }
+
+    /// Removes an account everywhere, including repeat history. Offline
+    /// sources do not call this: their queue entries remain in place.
+    pub fn remove_account(&mut self, account: AccountId) -> bool {
+        let before = self.history[..self.cycle_start.min(self.history.len())].iter().filter(|i| i.key.account == account).count();
+        self.history.retain(|i| i.key.account != account);
+        self.cycle_start = self.cycle_start.saturating_sub(before).min(self.history.len());
+        self.upcoming.retain(|i| i.key.account != account);
+        let current = self.current.as_ref().is_some_and(|i| i.key.account == account);
+        if current {
+            self.current = None;
+        }
+        current
     }
 
     fn retire_current(&mut self) {
@@ -308,20 +325,20 @@ impl Queue {
     /// Plays `tracks[start]` now and queues the rest of `tracks` after it. What
     /// was upcoming is replaced, except items the user added by hand, which
     /// stay before or after the new tracks or go too, as [`OnPlay`] says.
-    pub fn play_now(&mut self, tracks: Vec<Track>, start: usize, source: Source) {
-        self.play_now_with(tracks, start, source, self.prefs.on_play);
+    pub fn play_now(&mut self, account: AccountId, tracks: Vec<Track>, start: usize, source: Source) {
+        self.play_now_with(account, tracks, start, source, self.prefs.on_play);
     }
 
     /// [`play_now`](Self::play_now) with the hand-added items kept or cleared
     /// as `on_play` says, whatever the preference: the answer to
     /// [`OnPlay::Ask`] is a choice for this once, not a new setting.
-    pub fn play_now_with(&mut self, tracks: Vec<Track>, start: usize, source: Source, on_play: OnPlay) {
+    pub fn play_now_with(&mut self, account: AccountId, tracks: Vec<Track>, start: usize, source: Source, on_play: OnPlay) {
         if start >= tracks.len() {
             return;
         }
         self.retire_current();
         self.cycle_start = self.history.len();
-        let mut items = self.items(tracks, &source);
+        let mut items = self.items(account, tracks, &source);
         let rest = items.split_off(start + 1);
         self.current = items.pop();
         self.upcoming.retain(|i| i.source == Source::Added);
@@ -334,24 +351,24 @@ impl Queue {
 
     /// Queues `tracks` right after the current track, or after what was
     /// played next before them ([`NextAt`]).
-    pub fn play_next(&mut self, tracks: Vec<Track>) {
+    pub fn play_next(&mut self, account: AccountId, tracks: Vec<Track>) {
         let at = match self.prefs.play_next {
             NextAt::Top => 0,
             NextAt::AfterNext => self.upcoming.iter().take_while(|i| i.next).count(),
         };
-        let mut items = self.items(tracks, &Source::Added);
+        let mut items = self.items(account, tracks, &Source::Added);
         items.iter_mut().for_each(|i| i.next = true);
         self.upcoming.splice(at..at, items);
     }
 
     /// Queues `tracks` at the end, or after the other tracks added by hand at
     /// the front ([`AddAt`]).
-    pub fn add(&mut self, tracks: Vec<Track>) {
+    pub fn add(&mut self, account: AccountId, tracks: Vec<Track>) {
         let at = match self.prefs.add {
             AddAt::End => self.upcoming.len(),
             AddAt::BeforeSource => self.upcoming.iter().take_while(|i| i.source == Source::Added).count(),
         };
-        let items = self.items(tracks, &Source::Added);
+        let items = self.items(account, tracks, &Source::Added);
         self.upcoming.splice(at..at, items);
     }
 
@@ -458,14 +475,14 @@ impl Queue {
     /// Returns the new current item; `None` means playback should stop.
     pub fn advance(&mut self) -> Option<&Item> {
         if self.upcoming.is_empty() && self.end == EndAction::RepeatQueue {
-            let pass: Vec<(Track, Source)> = self.history[self.cycle_start.min(self.history.len())..]
+            let pass: Vec<(TrackKey, Track, Source)> = self.history[self.cycle_start.min(self.history.len())..]
                 .iter()
                 .chain(self.current.as_ref())
-                .map(|i| (i.track.clone(), i.source.clone()))
+                .map(|i| (i.key.clone(), i.track.clone(), i.source.clone()))
                 .collect();
             self.retire_current();
             self.cycle_start = self.history.len();
-            let items: Vec<Item> = pass.into_iter().map(|(t, s)| self.item(t, s)).collect();
+            let items: Vec<Item> = pass.into_iter().map(|(k, t, s)| self.item(k, t, s)).collect();
             self.upcoming = items;
         } else {
             self.retire_current();
@@ -502,9 +519,9 @@ impl Queue {
 
     /// Plays a track from history again, right now, without disturbing what's next.
     pub fn replay(&mut self, uid: u64) -> bool {
-        let Some(track) = self.history.iter().find(|i| i.uid == uid).map(|i| i.track.clone()) else { return false };
+        let Some((key, track)) = self.history.iter().find(|i| i.uid == uid).map(|i| (i.key.clone(), i.track.clone())) else { return false };
         self.retire_current();
-        let item = self.item(track, Source::Added);
+        let item = self.item(key, track, Source::Added);
         self.current = Some(item);
         true
     }
@@ -574,38 +591,38 @@ mod tests {
     #[test]
     fn play_now_starts_mid_album() {
         let mut q = Queue::default();
-        q.play_now(album(&["a1", "a2", "a3", "a4"]), 1, src("A"));
+        q.play_now(crate::test_tracks::account(), album(&["a1", "a2", "a3", "a4"]), 1, src("A"));
         assert_eq!(cur(&q), Some("a2"));
         assert_eq!(ids(&q.upcoming), ["a3", "a4"]);
         assert!(q.history.is_empty());
         // Out-of-range start is ignored.
-        q.play_now(album(&["x"]), 5, src("X"));
+        q.play_now(crate::test_tracks::account(), album(&["x"]), 5, src("X"));
         assert_eq!(cur(&q), Some("a2"));
     }
 
     #[test]
     fn play_now_keeps_hand_added_items_and_replaces_the_rest() {
         let mut q = Queue::default();
-        q.play_now(album(&["a1", "a2", "a3"]), 0, src("A"));
-        q.play_next(album(&["n1"]));
-        q.play_now(album(&["b1", "b2"]), 0, src("B"));
+        q.play_now(crate::test_tracks::account(), album(&["a1", "a2", "a3"]), 0, src("A"));
+        q.play_next(crate::test_tracks::account(), album(&["n1"]));
+        q.play_now(crate::test_tracks::account(), album(&["b1", "b2"]), 0, src("B"));
         assert_eq!(cur(&q), Some("b1"));
         assert_eq!(ids(&q.upcoming), ["b2", "n1"]);
         assert_eq!(ids(&q.history), ["a1"]);
         q.prefs.on_play = OnPlay::KeepBefore;
-        q.play_now(album(&["c1", "c2"]), 0, src("C"));
+        q.play_now(crate::test_tracks::account(), album(&["c1", "c2"]), 0, src("C"));
         assert_eq!(ids(&q.upcoming), ["n1", "c2"]);
         q.prefs.on_play = OnPlay::Clear;
-        q.play_now(album(&["d1", "d2"]), 0, src("D"));
+        q.play_now(crate::test_tracks::account(), album(&["d1", "d2"]), 0, src("D"));
         assert_eq!(ids(&q.upcoming), ["d2"]);
     }
 
     #[test]
     fn clear_can_leave_the_album() {
         let mut q = Queue::default();
-        q.play_now(album(&["a1", "a2", "a3"]), 0, src("A"));
-        q.play_next(album(&["n1"]));
-        q.add(album(&["z1"]));
+        q.play_now(crate::test_tracks::account(), album(&["a1", "a2", "a3"]), 0, src("A"));
+        q.play_next(crate::test_tracks::account(), album(&["n1"]));
+        q.add(crate::test_tracks::account(), album(&["z1"]));
         q.prefs.clear = ClearWhat::Added;
         assert!(q.can_clear());
         q.clear();
@@ -620,8 +637,8 @@ mod tests {
     #[test]
     fn a_clear_is_undone_exactly_until_the_queue_moves_on() {
         let mut q = Queue::default();
-        q.play_now(album(&["a1", "a2", "a3"]), 0, src("A"));
-        q.play_next(album(&["n1"]));
+        q.play_now(crate::test_tracks::account(), album(&["a1", "a2", "a3"]), 0, src("A"));
+        q.play_next(crate::test_tracks::account(), album(&["n1"]));
         let before: Vec<u64> = q.upcoming.iter().map(|i| i.uid).collect();
         let cleared = q.clear().expect("something to clear");
         assert_eq!(cleared.removed, 3);
@@ -632,7 +649,7 @@ mod tests {
         assert_eq!(ids(&q.upcoming), ["n1", "a2", "a3"]);
         // Added to since: the undo is refused and nothing changes.
         let cleared = q.clear().unwrap();
-        q.add(album(&["z1"]));
+        q.add(crate::test_tracks::account(), album(&["z1"]));
         assert!(!q.undo_clear(cleared));
         assert_eq!(ids(&q.upcoming), ["z1"]);
     }
@@ -640,30 +657,30 @@ mod tests {
     #[test]
     fn spotify_style_queue() {
         let mut q = Queue { prefs: Preset::Spotify.prefs().unwrap(), ..Default::default() };
-        q.play_now(album(&["a1", "a2"]), 0, src("A"));
-        q.add(album(&["z1"]));
-        q.play_next(album(&["n1"]));
-        q.play_next(album(&["n2"]));
-        q.add(album(&["z2"]));
+        q.play_now(crate::test_tracks::account(), album(&["a1", "a2"]), 0, src("A"));
+        q.add(crate::test_tracks::account(), album(&["z1"]));
+        q.play_next(crate::test_tracks::account(), album(&["n1"]));
+        q.play_next(crate::test_tracks::account(), album(&["n2"]));
+        q.add(crate::test_tracks::account(), album(&["z2"]));
         assert_eq!(ids(&q.upcoming), ["n1", "n2", "z1", "z2", "a2"]);
     }
 
     #[test]
     fn gathering_what_was_added() {
         let mut q = Queue::default();
-        q.play_now(album(&["a1", "a2", "a3"]), 0, src("A"));
-        q.play_next(album(&["n1"]));
-        q.add(album(&["z1", "z2"]));
+        q.play_now(crate::test_tracks::account(), album(&["a1", "a2", "a3"]), 0, src("A"));
+        q.play_next(crate::test_tracks::account(), album(&["n1"]));
+        q.add(crate::test_tracks::account(), album(&["z1", "z2"]));
         assert!(q.added_is_split());
         q.gather_added();
         assert_eq!(ids(&q.upcoming), ["n1", "z1", "z2", "a2", "a3"]);
         assert!(!q.added_is_split());
         // Nothing added at the front: they gather where the first one is.
         let mut q = Queue::default();
-        q.play_now(album(&["a1", "a2", "a3"]), 0, src("A"));
-        q.add(album(&["z1"]));
+        q.play_now(crate::test_tracks::account(), album(&["a1", "a2", "a3"]), 0, src("A"));
+        q.add(crate::test_tracks::account(), album(&["z1"]));
         q.upcoming.swap(1, 2);
-        q.add(album(&["z2"]));
+        q.add(crate::test_tracks::account(), album(&["z2"]));
         q.gather_added();
         assert_eq!(ids(&q.upcoming), ["a2", "z1", "z2", "a3"]);
     }
@@ -679,24 +696,24 @@ mod tests {
     #[test]
     fn play_next_goes_to_the_top() {
         let mut q = Queue::default();
-        q.play_now(album(&["a1", "a2"]), 0, src("A"));
-        q.play_next(album(&["n1"]));
-        q.play_next(album(&["n2", "n3"]));
+        q.play_now(crate::test_tracks::account(), album(&["a1", "a2"]), 0, src("A"));
+        q.play_next(crate::test_tracks::account(), album(&["n1"]));
+        q.play_next(crate::test_tracks::account(), album(&["n2", "n3"]));
         assert_eq!(ids(&q.upcoming), ["n2", "n3", "n1", "a2"]);
-        q.add(album(&["z"]));
+        q.add(crate::test_tracks::account(), album(&["z"]));
         assert_eq!(ids(&q.upcoming), ["n2", "n3", "n1", "a2", "z"]);
         assert_eq!(q.upcoming[4].source, Source::Added);
         // Ahead of what was added to the queue, too.
-        q.play_next(album(&["n4"]));
+        q.play_next(crate::test_tracks::account(), album(&["n4"]));
         assert_eq!(ids(&q.upcoming)[0], "n4");
     }
 
     #[test]
     fn groups_are_consecutive_runs() {
         let mut q = Queue::default();
-        q.play_now(album(&["a1", "a2", "a3"]), 0, src("A"));
-        q.play_next(album(&["n1", "n2"]));
-        q.add(album(&["z"]));
+        q.play_now(crate::test_tracks::account(), album(&["a1", "a2", "a3"]), 0, src("A"));
+        q.play_next(crate::test_tracks::account(), album(&["n1", "n2"]));
+        q.add(crate::test_tracks::account(), album(&["z"]));
         let g: Vec<Group> = q.groups().collect();
         assert_eq!(g.len(), 3);
         assert_eq!((g[0].source.label(), g[0].start, g[0].len), ("You added", 0, 2));
@@ -707,7 +724,7 @@ mod tests {
     #[test]
     fn remove_reorder_clear() {
         let mut q = Queue::default();
-        q.play_now(album(&["a1", "a2", "a3", "a4", "a5"]), 0, src("A"));
+        q.play_now(crate::test_tracks::account(), album(&["a1", "a2", "a3", "a4", "a5"]), 0, src("A"));
         let uid = |q: &Queue, id: &str| q.upcoming.iter().find(|i| i.track.id == id).unwrap().uid;
         assert!(q.remove(uid(&q, "a3")));
         assert!(!q.remove(9999));
@@ -731,7 +748,7 @@ mod tests {
     #[test]
     fn advance_and_stop_at_end() {
         let mut q = Queue::default();
-        q.play_now(album(&["a1", "a2"]), 0, src("A"));
+        q.play_now(crate::test_tracks::account(), album(&["a1", "a2"]), 0, src("A"));
         assert_eq!(q.peek_next().map(|i| i.track.id.as_str()), Some("a2"));
         assert_eq!(q.advance().map(|i| i.track.id.clone()), Some("a2".into()));
         assert_eq!(q.peek_next().map(|i| i.track.id.as_str()), None);
@@ -743,8 +760,8 @@ mod tests {
     #[test]
     fn repeat_queue_replays_the_current_pass() {
         let mut q = Queue::default();
-        q.play_now(album(&["old"]), 0, src("O"));
-        q.play_now(album(&["a1", "a2"]), 0, src("A"));
+        q.play_now(crate::test_tracks::account(), album(&["old"]), 0, src("O"));
+        q.play_now(crate::test_tracks::account(), album(&["a1", "a2"]), 0, src("A"));
         q.end = EndAction::RepeatQueue;
         q.advance();
         assert_eq!(cur(&q), Some("a2"));
@@ -762,7 +779,7 @@ mod tests {
     fn history_keeps_only_the_latest_plays() {
         let names: Vec<String> = (0..HISTORY_CAP + 50).map(|i| format!("t{i}")).collect();
         let mut q = Queue::default();
-        q.play_now(album(&names.iter().map(String::as_str).collect::<Vec<_>>()), 0, src("A"));
+        q.play_now(crate::test_tracks::account(), album(&names.iter().map(String::as_str).collect::<Vec<_>>()), 0, src("A"));
         while q.advance().is_some() {}
         assert_eq!(q.history.len(), HISTORY_CAP);
         assert_eq!(q.history[0].track.id, format!("t{}", 50), "the oldest went");
@@ -772,7 +789,7 @@ mod tests {
     #[test]
     fn repeating_a_queue_for_days_keeps_history_capped() {
         let mut q = Queue::default();
-        q.play_now(album(&["a1", "a2", "a3"]), 0, src("A"));
+        q.play_now(crate::test_tracks::account(), album(&["a1", "a2", "a3"]), 0, src("A"));
         q.end = EndAction::RepeatQueue;
         for _ in 0..HISTORY_CAP * 3 {
             q.advance();
@@ -791,7 +808,7 @@ mod tests {
     fn a_repeated_pass_longer_than_the_cap_stays_whole() {
         let names: Vec<String> = (0..HISTORY_CAP + 20).map(|i| format!("t{i}")).collect();
         let mut q = Queue::default();
-        q.play_now(album(&names.iter().map(String::as_str).collect::<Vec<_>>()), 0, src("A"));
+        q.play_now(crate::test_tracks::account(), album(&names.iter().map(String::as_str).collect::<Vec<_>>()), 0, src("A"));
         q.end = EndAction::RepeatQueue;
         for _ in 0..names.len() - 1 {
             q.advance();
@@ -805,7 +822,7 @@ mod tests {
     #[test]
     fn back_jump_and_replay() {
         let mut q = Queue::default();
-        q.play_now(album(&["a1", "a2", "a3", "a4"]), 0, src("A"));
+        q.play_now(crate::test_tracks::account(), album(&["a1", "a2", "a3", "a4"]), 0, src("A"));
         q.advance();
         assert_eq!(q.back().map(|i| i.track.id.clone()), Some("a1".into()));
         assert_eq!(ids(&q.upcoming), ["a2", "a3", "a4"]);
@@ -827,21 +844,21 @@ mod tests {
     fn play_now_with_a_choice_overrides_the_preference_once() {
         let mut q = Queue::default();
         q.prefs.on_play = OnPlay::Ask;
-        q.play_now(album(&["a1", "a2"]), 0, src("A"));
-        q.add(album(&["z1"]));
-        q.play_now_with(album(&["b1", "b2"]), 0, src("B"), OnPlay::Clear);
+        q.play_now(crate::test_tracks::account(), album(&["a1", "a2"]), 0, src("A"));
+        q.add(crate::test_tracks::account(), album(&["z1"]));
+        q.play_now_with(crate::test_tracks::account(), album(&["b1", "b2"]), 0, src("B"), OnPlay::Clear);
         assert_eq!(ids(&q.upcoming), ["b2"], "what was added went");
         assert_eq!(q.prefs.on_play, OnPlay::Ask, "the preference is untouched");
-        q.add(album(&["z2"]));
-        q.play_now_with(album(&["c1", "c2"]), 0, src("C"), OnPlay::KeepBefore);
+        q.add(crate::test_tracks::account(), album(&["z2"]));
+        q.play_now_with(crate::test_tracks::account(), album(&["c1", "c2"]), 0, src("C"), OnPlay::KeepBefore);
         assert_eq!(ids(&q.upcoming), ["z2", "c2"]);
     }
 
     #[test]
     fn going_back_past_a_play_now_brings_that_track_into_the_repeated_pass() {
         let mut q = Queue::default();
-        q.play_now(album(&["old"]), 0, src("O"));
-        q.play_now(album(&["a1", "a2"]), 0, src("A"));
+        q.play_now(crate::test_tracks::account(), album(&["old"]), 0, src("O"));
+        q.play_now(crate::test_tracks::account(), album(&["a1", "a2"]), 0, src("A"));
         q.end = EndAction::RepeatQueue;
         assert_eq!(q.back().map(|i| i.track.id.clone()), Some("old".into()));
         assert_eq!(ids(&q.upcoming), ["a1", "a2"]);
@@ -858,11 +875,11 @@ mod tests {
         let olds: Vec<String> = (0..30).map(|i| format!("o{i}")).collect();
         let names: Vec<String> = (0..HISTORY_CAP).map(|i| format!("t{i}")).collect();
         let mut q = Queue::default();
-        q.play_now(album(&olds.iter().map(String::as_str).collect::<Vec<_>>()), 0, src("O"));
+        q.play_now(crate::test_tracks::account(), album(&olds.iter().map(String::as_str).collect::<Vec<_>>()), 0, src("O"));
         while !q.upcoming.is_empty() {
             q.advance();
         }
-        q.play_now(album(&names.iter().map(String::as_str).collect::<Vec<_>>()), 0, src("A"));
+        q.play_now(crate::test_tracks::account(), album(&names.iter().map(String::as_str).collect::<Vec<_>>()), 0, src("A"));
         q.end = EndAction::RepeatQueue;
         let last = q.upcoming.last().unwrap().uid;
         assert!(q.jump_to(last));
@@ -875,17 +892,38 @@ mod tests {
     #[test]
     fn same_track_twice_has_distinct_uids() {
         let mut q = Queue::default();
-        q.add(album(&["x"]));
-        q.add(album(&["x"]));
+        q.add(crate::test_tracks::account(), album(&["x"]));
+        q.add(crate::test_tracks::account(), album(&["x"]));
         assert_ne!(q.upcoming[0].uid, q.upcoming[1].uid);
         assert!(q.remove(q.upcoming[1].uid));
         assert_eq!(q.upcoming.len(), 1);
     }
 
     #[test]
+    fn the_same_id_on_two_accounts_stays_distinct_through_remove_repeat_and_replay() {
+        let (one, two) = (AccountId::new(), AccountId::new());
+        let mut q = Queue::default();
+        q.add(one, album(&["abc"]));
+        q.add(two, album(&["abc"]));
+        assert_ne!(q.upcoming[0].key, q.upcoming[1].key);
+        let removed = q.upcoming[1].uid;
+        assert!(q.remove(removed));
+        assert_eq!(q.upcoming[0].key, TrackKey::new(one, "abc"));
+        q.add(two, album(&["abc"]));
+        q.end = EndAction::RepeatQueue;
+        q.advance();
+        let first = q.current.as_ref().unwrap().uid;
+        assert_eq!(q.advance().unwrap().key, TrackKey::new(two, "abc"));
+        assert_eq!(q.advance().unwrap().key, TrackKey::new(one, "abc"));
+        assert_eq!(q.advance().unwrap().key, TrackKey::new(two, "abc"));
+        assert!(q.replay(first));
+        assert_eq!(q.current.as_ref().unwrap().key, TrackKey::new(one, "abc"));
+    }
+
+    #[test]
     fn timing() {
         let mut q = Queue::default();
-        q.play_now(vec![t("a", 300), t("b", 200), t("c", 60), t("d", 0)], 0, src("A"));
+        q.play_now(crate::test_tracks::account(), vec![t("a", 300), t("b", 200), t("c", 60), t("d", 0)], 0, src("A"));
         assert_eq!(start_offsets(120.0, &q.upcoming), [120.0, 320.0, 380.0]);
         assert_eq!(end_offset(120.0, &q.upcoming), 380.0);
         assert_eq!(end_offset(-5.0, &[]), 0.0);

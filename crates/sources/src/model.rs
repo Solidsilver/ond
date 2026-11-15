@@ -13,7 +13,7 @@
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use crate::id::{AccountId, ItemKey};
+use accounts::{AccountId, ItemKey};
 
 /// A library's id, as its source gave it. Only meaningful with the account it
 /// came from.

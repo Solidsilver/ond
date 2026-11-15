@@ -161,7 +161,7 @@ fn show_track(smtc: &SystemMediaTransportControls, info: &Info, art: &Option<(St
     music.SetArtist(&HSTRING::from(info.artist.as_deref().unwrap_or_default()))?;
     music.SetAlbumTitle(&HSTRING::from(info.album.as_deref().unwrap_or_default()))?;
     match art {
-        Some((id, bytes)) if *id == info.track_id => display.SetThumbnail(&thumbnail(bytes)?)?,
+        Some((id, bytes)) if *id == info.key.item => display.SetThumbnail(&thumbnail(bytes)?)?,
         _ => display.SetThumbnail(None)?,
     }
     display.Update()

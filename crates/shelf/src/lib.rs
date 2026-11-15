@@ -43,9 +43,10 @@ pub use bookmarks::{BookmarkChange, BookmarkSnapshot, PendingBookmark};
 
 use model::{BookmarkV1, ChaptersV1, DetailsV1, ItemV1, LibrarySyncV1, LocalListeningV1, PositionV1, ProgressEntryV1, ProgressEntryV2, SummaryV1, TracksV1};
 
+use accounts::ItemKey;
 use redb::{Database, ReadableDatabase, ReadableTable, Table, TableDefinition, WriteTransaction};
 use serde::{Serialize, de::DeserializeOwned};
-use sources::{Changes, Item, ItemKey, ItemSummary, Library, Position, Progress, ProgressUpdate, Stamp};
+use sources::{Changes, Item, ItemSummary, Library, Position, Progress, ProgressUpdate, Stamp};
 use std::collections::HashMap;
 use std::ops::Bound::{Excluded, Included, Unbounded};
 use std::path::Path;
