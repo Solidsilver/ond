@@ -2381,7 +2381,13 @@ mod tests {
         }
         until(&rt, &rx, &mut got, |m| m.iter().any(|m| matches!(m, Msg::Library(LibraryMsg::AllTracks(t)) if t.all.len() == 51)));
         watch_settles(&rt, &rx, &mut got);
-        assert_eq!(scan_count(&got), 1, "the whole burst is one scan");
+        // Windows can report some of the copies' writes after their scan has
+        // begun, which earns one follow-up; fifty files must not be fifty scans.
+        let scans = scan_count(&got);
+        assert!((1..=2).contains(&scans), "the whole burst is one scan, or two with late events: {scans}");
+        got.clear();
+        watch_settles(&rt, &rx, &mut got);
+        assert_eq!(scan_count(&got), 0, "and then the folder is quiet");
     }
 
     #[test]

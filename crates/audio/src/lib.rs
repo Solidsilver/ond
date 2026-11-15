@@ -130,7 +130,7 @@ pub mod tap;
 pub use channels::ChannelChange;
 pub use crossbeam_channel::Receiver as EventReceiver;
 pub use device::{DeviceEvent, DeviceInfo, DeviceKind, DeviceVolume};
-pub(crate) use output::{CpalBackend, RingCtl};
+pub(crate) use output::RingCtl;
 pub use output::{OutputBackend, OutputError, RingInput, StreamFormat};
 pub use replaygain::{GainConfig, GainMode, ReplayGain};
 pub use signal::{BitPerfectStatus, DeviceCaps, GainState, RateRange, SignalPath, describe, khz};
@@ -592,7 +592,7 @@ pub fn default_backend() -> Box<dyn OutputBackend> {
     #[cfg(target_os = "linux")]
     let backend: Box<dyn OutputBackend> = Box::new(self::alsa::AlsaBackend::new());
     #[cfg(not(target_os = "linux"))]
-    let backend: Box<dyn OutputBackend> = Box::new(CpalBackend::default());
+    let backend: Box<dyn OutputBackend> = Box::new(output::CpalBackend::default());
     backend
 }
 
