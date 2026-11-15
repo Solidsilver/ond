@@ -40,7 +40,7 @@ mod sync;
 #[cfg(test)]
 mod test_tracks;
 mod tracks;
-mod updates;
+use shell::updates;
 mod visuals;
 mod widgets;
 mod window;
