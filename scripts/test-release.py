@@ -112,6 +112,17 @@ class ReleaseTests(unittest.TestCase):
             with self.subTest(tag=tag):
                 self.run_script("scripts/release-tag.sh", success=False, GITHUB_REF=f"refs/tags/{tag}")
 
+    def test_an_ond_beta_tag_is_a_prerelease_and_never_latest(self):
+        out = self.run_script(
+            "scripts/release-tag.sh", GITHUB_REF="refs/tags/ond-v0.7.0-beta.1",
+            TEST_VERSION="0.7.0-beta.1",
+        ).stdout
+        values = dict(line.split("=", 1) for line in out.splitlines())
+        self.assertEqual(values, dict(app="ond", name="Ond", version="0.7.0-beta.1", prerelease="true"))
+        workflow = (ROOT / ".github/workflows/release.yml").read_text()
+        self.assertIn("prerelease: ${{ needs.tag.outputs.prerelease == 'true' }}", workflow)
+        self.assertIn("make_latest: ${{ needs.tag.outputs.app == 'ond' && needs.tag.outputs.prerelease == 'false' }}", workflow)
+
     def test_manual_builds_select_either_app_without_a_tag(self):
         for app in ["ond", "rede"]:
             out = self.run_script("scripts/release-tag.sh", app, GITHUB_REF="refs/heads/dev").stdout

@@ -20,8 +20,9 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  # These builds look for newer releases (apps/ond/src/updates.rs).
+  # These builds look for newer releases through shell::updates.
   OND_DISTRIBUTION: github
+  REDE_DISTRIBUTION: github
 
 jobs:
   # Which app the tag is for and the version it names. A tag must name the
@@ -230,7 +231,7 @@ jobs:
       - name: Previous release
         run: |
           case "$APP" in
-            ond) pattern='^(ond-)?v[0-9]+\.[0-9]+\.[0-9]+$' ;;
+            ond) pattern='^(ond-)?v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$' ;;
             rede) pattern='^rede-v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$' ;;
           esac
           previous="$(
