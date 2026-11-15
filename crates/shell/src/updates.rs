@@ -185,6 +185,10 @@ pub enum UpdateAction {
     Check(UpdateCheck),
     Channel(Option<UpdateChannel>),
     CheckNow,
+    /// Closes through the normal quit path, which stops playback first.
+    Restart,
+    /// Tries a failed download again.
+    Retry,
     Notes(Version),
 }
 
@@ -192,6 +196,9 @@ pub enum UpdateAction {
 pub enum UpdateMsg {
     Checked(Result<Candidates, String>),
     ReleaseNotes(Version, Notes),
+    Install(install::Event),
+    /// An earlier quit could not finish installation, or startup cleanup failed.
+    InstallError(install::Error),
 }
 
 /// What an app knows about updates. `latest` follows the effective channel;

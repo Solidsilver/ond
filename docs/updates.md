@@ -68,3 +68,45 @@ HTTPS proves a file came from GitHub, not that it came from us: anyone who could
 - Delta updates: each update downloads the whole file.
 - Installing while the app keeps running (macOS and Linux could, Windows couldn't).
 - A Windows installer or Linux packages (Flatpak, AppImage).
+
+## Backend and UI handoff
+
+The shared drawing code has not yet changed for installation. Both apps route
+`UpdateAction` through `app/updating.rs`. The UI can offer
+`UpdateAction::Check(UpdateCheck::Install)` in the existing update control,
+`UpdateAction::Restart` when ready, and `UpdateAction::Retry` after a failure.
+Restart requests the normal window close; each app's quit handler stops its
+playback engine before calling `Updates::install_on_quit`.
+
+Read `Updates::install` (`shell::updates::install::State`):
+
+- `Idle`: no installation requested.
+- `Downloading { version, received, total }`: byte progress; total may be absent.
+  Progress messages request repaints at most twice per second during transfer,
+  plus the start and completion. The UI needs no polling or indefinite spinner.
+- `Ready { version, .. }`: verified and unpacked; offer Restart to Update.
+- `Failed { version, error }`: typed `install::Error`; format it where shown.
+- `NotifyOnly { version, reason }`: keep the release link and show why automatic
+  installation cannot run. `Fallback` is `UnsupportedPlatform`, `UnknownLayout`,
+  `Translocated`, `DiskImage` or `ReadOnly`. Supply short wording in the UI.
+
+`Updates::install_error` holds startup cleanup errors or an installation failure
+reported by a helper from the previous quit. The helper reports rollback
+failures with the backup's location so the previous app can be recovered.
+
+Bridges send `UpdateMsg::Install(Event { generation, kind })`; `EventKind` is
+`Progress`, `Finished(Result<Prepared, Error>)` or `NotifyOnly(Fallback)`.
+`UpdateMsg::InstallError(Error)` reports startup/previous-quit errors. The app
+handles these messages without account scoping: releases belong to no account.
+`Updates::stage_update` reconciles the download with the effective channel,
+setting and skipped version. Generations discard late results; changing the
+choice, skipping or retrying aborts the previous worker and disposes its stage.
+
+Stages use cache subdirectories with locks so another app instance's cleanup
+cannot remove an active download. The Unix helper owns a stage after launch;
+an abandoned helper marker expires after a day. Ownership markers also reclaim
+replacement copies beside the app; a failed rollback keeps its backup for
+manual recovery. A replacement on another volume
+is copied into a temporary directory beside the installed app before Ready,
+so the final bundle or binary swap uses a rename. No unsigned archive reaches
+the platform preparation or quit path.

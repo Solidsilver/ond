@@ -432,6 +432,35 @@ struct LibrarySlot {
 }
 
 impl Bridge {
+    /// Repository updates belong to no account, so this deliberately uses
+    /// the raw sender rather than a session-scoped bridge.
+    pub fn stage_update(
+        &self,
+        state: &mut crate::updates::Updates,
+        eligible: Option<&crate::updates::Version>,
+        check: crate::updates::UpdateCheck,
+        cache: std::path::PathBuf,
+    ) {
+        let tx = self.tx.clone();
+        let notify = self.notify.clone();
+        state.stage_update(eligible, check, &self.rt, &crate::updates::OND, cache, move |event| {
+            let _ = tx.send(Msg::Update(crate::updates::UpdateMsg::Install(event)));
+            notify();
+        });
+    }
+
+    /// Cleanup is app-wide too; a live stage's lock protects other instances.
+    pub fn clean_update_stages(&self, cache: std::path::PathBuf) {
+        let tx = self.tx.clone();
+        let notify = self.notify.clone();
+        self.rt.spawn_blocking(move || {
+            if let Err(error) = crate::updates::install::startup(&cache) {
+                let _ = tx.send(Msg::Update(crate::updates::UpdateMsg::InstallError(error)));
+                notify();
+            }
+        });
+    }
+
     /// Starts the app-wide checker, independent of account sessions. The
     /// callback keeps only the sender and repaint notifier alive.
     pub fn start_updates(&self, on: Arc<std::sync::atomic::AtomicBool>, now: Arc<tokio::sync::Notify>) {

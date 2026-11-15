@@ -311,6 +311,7 @@ pub struct RedeApp {
     /// A newer, unskipped release eligible for the update notice.
     pub update: Option<crate::updates::Version>,
     pub updates: Updates,
+    update_cache: std::path::PathBuf,
     update_check: std::sync::Arc<std::sync::atomic::AtomicBool>,
     update_now: std::sync::Arc<tokio::sync::Notify>,
 }
@@ -326,6 +327,7 @@ impl RedeApp {
             app.bridge.receive_urls();
         }
         app.update_check.store(app.prefs.get(|s| s.updates) != crate::settings::UpdateCheck::Off, std::sync::atomic::Ordering::Relaxed);
+        app.bridge.clean_update_stages(app.update_cache.clone());
         app.bridge.start_updates(app.update_check.clone(), app.update_now.clone());
         app.bridge.restore_openid();
         Ok(app)
@@ -420,6 +422,7 @@ impl RedeApp {
             stats: Default::default(),
             update: None,
             updates: Updates::default(),
+            update_cache: paths.art_cache.with_file_name("updates"),
             update_check: Default::default(),
             update_now: Default::default(),
         })
@@ -977,6 +980,11 @@ impl eframe::App for RedeApp {
         shell::now_playing::publish(None, shell::now_playing::State::Stopped, 0.0);
         self.finish_playback();
         self.prefs.flush();
+        if let Err(error) = self.updates.install_on_quit() {
+            tracing::error!("update installation: {error}");
+            let _ = std::fs::create_dir_all(&self.update_cache);
+            let _ = std::fs::write(self.update_cache.join("last-install-error"), error.to_string());
+        }
     }
 }
 

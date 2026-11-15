@@ -133,6 +133,60 @@ CI builds and runs the tests; nothing below has been tried on real Windows yet.
 - [ ] Install Rede's CI bundles on macOS and Linux, launch from the app menu, relaunch with saved credentials, then uninstall on Linux. User data and Ond's installation stay untouched. Check the detailed beta gates in [docs/releasing.md](docs/releasing.md).
 - [ ] A GitHub build older than the newest Ond release: Settings › About says the new version is available, shows its notes, and Download opens its page. A Rede release newer than it doesn't change that.
 
+### Installing signed updates (both apps)
+
+The backend is wired; until the installation UI lands, select `"updates":
+"install"` in a GitHub build's settings file and use the update actions through
+a developer harness. Source/Nix builds deliberately do not auto-install.
+Use release builds whenever playback is involved. These are manual gates,
+not claims that signed production updates have been installed successfully:
+
+- [ ] Publish a disposable test release using an offline test signing key and
+  a build embedding its public key. Check all `dist/` files have adjacent
+  `.minisig` assets and verify them with minisign. With no CI key, publication
+  warns and remains notify-only; with a wrong password, publication fails.
+  Production signing secrets were not exercised by the automated checks.
+- [ ] On macOS, try installed Ond and Rede bundles with matching Developer ID
+  teams, a different team, and ad-hoc signing. Only the matching team (or an
+  ad-hoc running app) can reach Ready; every archive still requires minisign.
+  Try an app opened from its dmg, a translocated path and an unwritable
+  `/Applications`: expect a typed fallback and no stage left behind.
+- [ ] On macOS, test both architectures and a cache on a different volume.
+  Restart to Update and ordinary Quit must stop audible playback and release
+  the device before the helper swaps the bundle and reopens it. Test a failed
+  destination move and a failed rollback; retain the backup location reported
+  at the next launch. Gatekeeper/notarization and `open` need real bundles.
+- [ ] On Linux x86_64 and ARM64, test both install.sh layouts (`~/.local`, and
+  an unwritable `/usr/local`) plus a loose unpacked binary. Installation should
+  refresh desktop entries/icons for a prefix, preserve the old binary on
+  failure and relaunch the correct path. Test Restart and Quit while playing.
+- [ ] On Windows x86_64, test Ond's executable rename/relaunch on a real desktop,
+  `.old` cleanup after the previous process exits, a read-only directory and a
+  failed replacement/relaunch with rollback. Rede has no Windows release and
+  must report UnsupportedPlatform rather than attempt to fetch Ond's archive.
+- [ ] Interrupt downloads and relaunch; skip or change channel/mode during a
+  download and after Ready. No partial, skipped or superseded update installs.
+  Try missing, corrupt and wrong-file signatures. Progress stops repainting
+  when I/O stops; paused/ready/failed/fallback states settle to idle.
+
+Automated tests use a committed throwaway public key and signature (the test
+secret was discarded), RangeServer downloads, pure platform/layout planners,
+and the actual Unix helper against fake bundles/binaries. They exercise
+signature rejection, partial cancellation, stale/skip cleanup, exit waiting,
+layout installation and rollback without replacing this development app.
+Native playback, signing identities, Gatekeeper, desktop integration and
+Windows process/file-sharing behavior still need the checks above.
+
+Backend validation on 2026-11-14 used an Apple Silicon macOS host. The shared
+crate compiled natively and for `x86_64-unknown-linux-gnu` and
+`x86_64-pc-windows-gnu` (Rust 1.99.1 targets, Zig C cross compiler). The
+`x86_64-pc-windows-msvc` attempt stopped in the existing aws-lc-sys TLS
+dependency because Windows SDK headers (`windows.h`) were absent; rerun it
+on a Windows/MSVC builder. Linux ARM64 compilation/runtime and Windows/macOS
+Intel runtime were not exercised. The full apps were checked on the native
+host; the cross checks covered shell, including its platform installers.
+
+
 ## Analysis
 - [ ] Settings → Library → Analyze library: progress, pauses while playback buffers; album pages show `DR · LUFS` and, only when suspicious, a "likely upsampled / lossy source" chip.
 

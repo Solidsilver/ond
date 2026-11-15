@@ -22,6 +22,15 @@ impl RedeApp {
                     self.update_now.notify_one();
                 }
             }
+            UpdateAction::Restart => {
+                if self.updates.install.ready() {
+                    self.ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+            }
+            UpdateAction::Retry => {
+                self.updates.cancel_install();
+                self.select_update();
+            }
             UpdateAction::Notes(v) => {
                 if self.updates.notes.as_ref().is_none_or(|(n, _)| *n != v) {
                     self.updates.notes = Some((v.clone(), None));
@@ -50,11 +59,17 @@ impl RedeApp {
     fn select_update(&mut self) {
         let channel = self.effective_update_channel();
         self.update = self.prefs.get(|s| self.updates.select(&updates::current(), Some(channel), s.updates, s.skipped_update.as_deref()));
+        if updates::channel() == updates::Channel::GitHub {
+            let check = self.prefs.get(|s| s.updates);
+            self.bridge.stage_update(&mut self.updates, self.update.as_ref(), check, self.update_cache.clone());
+        }
         self.shown = super::PrefsView::read(&self.prefs);
     }
 
     pub(super) fn update_message(&mut self, msg: UpdateMsg) {
         match msg {
+            UpdateMsg::Install(event) => self.updates.install_event(event),
+            UpdateMsg::InstallError(error) => self.updates.install_error = Some(error),
             UpdateMsg::Checked(result) => {
                 self.updates.receive(result);
                 self.select_update();
@@ -78,6 +93,23 @@ mod tests {
 
     fn candidates() -> Candidates {
         Candidates { release: Some(Version::parse("99.0.0").unwrap()), beta: Some(Version::parse("100.0.0-beta.2").unwrap()) }
+    }
+
+    #[test]
+    fn install_messages_expose_progress_failure_and_the_notify_only_reason() {
+        use crate::updates::install::{Error, Event, EventKind, Fallback, State};
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = egui::Context::default();
+        let mut app = super::super::fixture::app(&ctx, dir.path(), 0);
+        app.updates.install = State::Downloading { version: candidates().release.unwrap(), received: 0, total: None };
+        app.handle(Msg::Update(UpdateMsg::Install(Event { generation: 0, kind: EventKind::Progress { received: 12, total: Some(24) } })));
+        assert!(matches!(app.updates.install, State::Downloading { received: 12, total: Some(24), .. }));
+        app.handle(Msg::Update(UpdateMsg::Install(Event { generation: 0, kind: EventKind::Finished(Err(Error::Signature)) })));
+        assert!(matches!(app.updates.install, State::Failed { error: Error::Signature, .. }));
+        app.handle(Msg::Update(UpdateMsg::Install(Event { generation: 0, kind: EventKind::NotifyOnly(Fallback::ReadOnly) })));
+        assert!(matches!(app.updates.install, State::NotifyOnly { reason: Fallback::ReadOnly, .. }));
+        app.handle(Msg::Update(UpdateMsg::InstallError(Error::Command("helper"))));
+        assert!(matches!(app.updates.install_error, Some(Error::Command("helper"))));
     }
 
     #[test]
