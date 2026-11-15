@@ -532,6 +532,47 @@ fn scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
     app_mut(h).updates.checked = Some(std::time::SystemTime::now() - std::time::Duration::from_secs(2 * 3600));
     app_mut(h).actions.push(Action::OpenSettings(settings_page::Section::About));
     s.shoot(h, "about-up-to-date");
+    // Installing updates: the switch on; 0.7.0 downloading, ready (in About,
+    // narrow too, and in the sidebar's notice), failed, and found where Ond
+    // can't replace itself; then the last update not having installed.
+    // Checking goes back to notifying after, as later scenes expect.
+    {
+        use crate::updates::install::{Error, Fallback, State};
+        let v = crate::updates::Version::parse("0.7.0").unwrap();
+        let installing = |h: &mut _, size, install: Option<State>, about: bool| {
+            reset(h, size, Route::Recent);
+            let app = app_mut(h);
+            app.prefs.edit(|s| s.updates = crate::updates::UpdateCheck::Install);
+            app.updates.checked = Some(std::time::SystemTime::now() - std::time::Duration::from_secs(2 * 3600));
+            if let Some(install) = install {
+                app.update = Some(v.clone());
+                app.updates.latest = Some(v.clone());
+                app.updates.notes = Some((v.clone(), Some(Ok(vec![crate::updates::Block::Paragraph("Ond installs its own updates.".into())]))));
+                app.updates.install = install;
+            }
+            if about {
+                app.actions.push(Action::OpenSettings(settings_page::Section::About));
+            }
+        };
+        installing(h, FULL, None, true);
+        s.shoot(h, "about-install-on");
+        installing(h, FULL, Some(State::Downloading { version: v.clone(), received: 12_400_000, total: Some(24_100_000) }), true);
+        s.shoot(h, "about-update-downloading");
+        installing(h, FULL, Some(State::preview_ready(v.clone())), false);
+        s.shoot(h, "update-ready");
+        installing(h, FULL, Some(State::preview_ready(v.clone())), true);
+        s.shoot(h, "about-update-ready");
+        installing(h, vec2(720.0, 600.0), Some(State::preview_ready(v.clone())), true);
+        s.shoot(h, "about-update-ready-narrow");
+        installing(h, FULL, Some(State::Failed { version: v.clone(), error: Error::Signature }), true);
+        s.shoot(h, "about-update-failed");
+        installing(h, FULL, Some(State::NotifyOnly { version: v.clone(), reason: Fallback::DiskImage }), true);
+        s.shoot(h, "about-update-notify-only");
+        installing(h, FULL, None, true);
+        app_mut(h).updates.install_error = Some(Error::Worker("couldn't replace /Applications/Ond.app, so the previous copy was put back".into()));
+        s.shoot(h, "about-install-error");
+        app_mut(h).prefs.edit(|s| s.updates = crate::updates::UpdateCheck::Notify);
+    }
     // The channel picked rather than followed, then a beta offered on it
     // with its notes, in a narrow window and a full one (full last, so the
     // Settings window the next scenes open starts where they expect it).

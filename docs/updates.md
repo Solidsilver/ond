@@ -84,10 +84,22 @@ HTTPS proves a file came from GitHub, not that it came from us: anyone who could
 
 ## Backend and UI handoff
 
-The shared drawing code has not yet changed for installation. Both apps route
-`UpdateAction` through `app/updating.rs`. The UI can offer
-`UpdateAction::Check(UpdateCheck::Install)` in the existing update control,
-`UpdateAction::Restart` when ready, and `UpdateAction::Retry` after a failure.
+`shell::kit::updates` draws installation for both apps. About has an Install
+updates automatically switch under Check for updates, shown while checking is
+on and locked with it when `updates` is managed; it sends
+`UpdateAction::Check(UpdateCheck::Install)` or `Notify`. Turning checking off
+and on again brings back Install if it was on, for as long as the app runs. The
+status row follows `Updates::install`: progress with Skip while downloading,
+Restart to Update (`UpdateAction::Restart`) and Skip when ready, Retry
+(`UpdateAction::Retry`) and Skip after a failure, and the usual Download and
+Skip with a line saying why when installation can't run. `install_error` shows
+as its own row above the status until the next download clears it. The
+sidebar's notice and the rail's gear tooltip come from `kit::update_notice` and
+say Downloading or ready in place of available. Tests and snapshots build Ready
+with `install::State::preview_ready`, compiled for tests and the `preview`
+feature only; its empty stage can't install anything.
+
+Both apps route `UpdateAction` through `app/updating.rs`.
 Restart requests the normal window close; each app's quit handler stops its
 playback engine before calling `Updates::install_on_quit`. Both apps call
 `Updates::request_restart` for Restart to Update, carrying the relaunch choice

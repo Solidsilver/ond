@@ -649,7 +649,67 @@ fn scenes(h: &mut Harness<'_, Option<RedeApp>>, s: &Shooter) {
             app
         });
     }
-    h.set_size(egui::vec2(FULL[0], FULL[1]));
+    // Installing updates: the switch on; 0.2.0 downloading, ready (in About,
+    // narrow too, and in the sidebar's notice), failed, and found where Rede
+    // can't replace itself; then the last update not having installed.
+    let installing = |install: Option<crate::updates::install::State>, about: bool| {
+        let mut app = if install.is_some() {
+            newer()
+        } else {
+            let mut app = app(&ctx, dir.path(), BOOKS.len());
+            playing(&mut app, false);
+            app
+        };
+        app.prefs.edit(|s| s.updates = crate::updates::UpdateCheck::Install);
+        app.updates.checked = Some(std::time::SystemTime::now() - std::time::Duration::from_secs(2 * 3600));
+        if let Some(install) = install {
+            app.updates.install = install;
+        }
+        if about {
+            app.apply(Action::OpenSettings(super::settings_page::Tab::About));
+        }
+        app
+    };
+    {
+        use crate::updates::install::{Error, Fallback, State};
+        let v = || crate::updates::Version::parse("0.2.0").unwrap();
+        h.set_size(egui::vec2(FULL[0], FULL[1]));
+        scene(h, s, "settings-about-install-on", || installing(None, true));
+        scene(h, s, "settings-about-update-downloading", || {
+            installing(Some(State::Downloading { version: v(), received: 31_000_000, total: Some(58_200_000) }), true)
+        });
+        for (size, suffix) in [(FULL, ""), (crate::MIN_SIZE, "-narrow")] {
+            h.set_size(egui::vec2(size[0], size[1]));
+            scene(h, s, &format!("update-ready{suffix}"), || installing(Some(State::preview_ready(v())), false));
+        }
+        h.set_size(egui::vec2(FULL[0], FULL[1]));
+        scene(h, s, "settings-about-update-ready", || installing(Some(State::preview_ready(v())), true));
+        // The narrowest window has the switches filling the sheet, so it's
+        // scrolled down to the update's row and its buttons.
+        h.set_size(egui::vec2(crate::MIN_SIZE[0], crate::MIN_SIZE[1]));
+        *h.state_mut() = None;
+        *h.state_mut() = Some(installing(Some(State::preview_ready(v())), true));
+        h.run_steps(2);
+        h.hover_at(egui::pos2(crate::MIN_SIZE[0] * 0.6, crate::MIN_SIZE[1] * 0.6));
+        h.event(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: egui::vec2(0.0, -200.0),
+            phase: egui::TouchPhase::Move,
+            modifiers: egui::Modifiers::NONE,
+            source: egui::MouseWheelSource::Wheel,
+        });
+        h.run_steps(30);
+        h.event(egui::Event::PointerGone);
+        s.shoot(h, "settings-about-update-ready-narrow");
+        h.set_size(egui::vec2(FULL[0], FULL[1]));
+        scene(h, s, "settings-about-update-failed", || installing(Some(State::Failed { version: v(), error: Error::Signature }), true));
+        scene(h, s, "settings-about-update-notify-only", || installing(Some(State::NotifyOnly { version: v(), reason: Fallback::Translocated }), true));
+        scene(h, s, "settings-about-install-error", || {
+            let mut app = installing(None, true);
+            app.updates.install_error = Some(Error::Worker("couldn't replace /Applications/Rede.app, so the previous copy was put back".into()));
+            app
+        });
+    }
     // Settings › Sources with the account in view syncing; with three
     // accounts, then with one signed out and the one in view offline, its
     // row's menu open; and the question before removing one.
