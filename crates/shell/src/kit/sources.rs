@@ -949,7 +949,9 @@ mod tests {
     fn a_narrowed_scope_names_its_sources_or_counts_them_when_they_dont_fit() {
         let sources = three(&ONLINE);
         for look in [SwitcherLook::Line, SwitcherLook::Card] {
-            let mut h = harness(sources.to_vec(), narrowed(), look, SwitcherPlace::Foot { width: 220.0 });
+            // Wide enough for the names in any platform's fonts; Linux's run
+            // wider than macOS's, and the card has less room than the line.
+            let mut h = harness(sources.to_vec(), narrowed(), look, SwitcherPlace::Foot { width: 320.0 });
             h.run();
             h.get_by_label("Home server, Music folder, 2 of 3 sources");
             assert!(texts(&h).contains(&"Home server, Music folder".to_owned()), "{look:?}: {:?}", texts(&h));

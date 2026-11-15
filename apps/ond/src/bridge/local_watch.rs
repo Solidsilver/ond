@@ -13,8 +13,8 @@ use tokio::sync::watch;
 /// How long a folder must be quiet before it's rescanned. Tests use less:
 /// at two seconds a test that unplugs and replugs a folder spends most of
 /// its wait budget here, and times out when the suite runs in parallel.
-/// Their bursts are a tight loop of copies, well inside the shorter window.
-const SETTLE: Duration = if cfg!(test) { Duration::from_millis(500) } else { Duration::from_secs(2) };
+/// A second still holds a slow Windows runner's burst of copies together.
+const SETTLE: Duration = if cfg!(test) { Duration::from_secs(1) } else { Duration::from_secs(2) };
 
 pub(super) struct LocalWatch {
     source: Src,

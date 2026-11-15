@@ -2369,9 +2369,13 @@ mod tests {
         bridge.sync_source(&watched_folder(&music));
         let mut got = Vec::new();
         until(&rt, &rx, &mut got, |m| m.iter().any(|m| matches!(m, Msg::Library(LibraryMsg::AllTracks(t)) if t.all.len() == 1)));
+        // FSEvents can deliver the seed file's creation after the watch
+        // starts, which is one more scan. A scan that triggered itself
+        // would keep going, so after that settles the folder must stay quiet.
         watch_settles(&rt, &rx, &mut got);
-        assert_eq!(scan_count(&got), 1, "the startup scan must not trigger itself");
         got.clear();
+        watch_settles(&rt, &rx, &mut got);
+        assert_eq!(scan_count(&got), 0, "the startup scan must not trigger itself");
         for n in 0..50 {
             std::fs::copy(music.join("seed.flac"), music.join(format!("song-{n}.flac"))).unwrap();
         }
@@ -2405,12 +2409,14 @@ mod tests {
         seed_folder(&music);
         let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
         let (tx, rx) = std::sync::mpsc::channel();
-        let first = Arc::new(AtomicBool::new(true));
+        // Armed once the startup scan has settled, so a late native event
+        // for the seed file can't be counted as one of the requests' scans.
+        let armed = Arc::new(AtomicBool::new(false));
         let gate = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
         let notify: Notify = {
-            let gate = gate.clone();
+            let (gate, armed) = (gate.clone(), armed.clone());
             Arc::new(move || {
-                if first.swap(false, Ordering::Relaxed) {
+                if armed.swap(false, Ordering::Relaxed) {
                     let deadline = testkit::Deadline::new();
                     let mut open = gate.0.lock().unwrap();
                     while !*open {
@@ -2425,6 +2431,11 @@ mod tests {
         let source = watched_folder(&music);
         bridge.sync_source(&source);
         let mut got = Vec::new();
+        until(&rt, &rx, &mut got, |m| m.iter().any(|m| matches!(m, Msg::Library(LibraryMsg::TrackSyncDone(_)))));
+        watch_settles(&rt, &rx, &mut got);
+        got.clear();
+        armed.store(true, Ordering::Relaxed);
+        bridge.sync_source(&source);
         until(&rt, &rx, &mut got, |m| scan_count(m) == 1);
         for _ in 0..50 {
             bridge.sync_source(&source);
