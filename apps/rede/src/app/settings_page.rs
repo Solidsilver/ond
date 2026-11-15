@@ -19,8 +19,9 @@
 //! who's signed in and how, and the last sync with Sync now (the account
 //! menu keeps Sync now and Sign out… too, a click from the sidebar). Its
 //! state is on its row. About is Ond's: the version, then the kit's
-//! Updates group (Check for updates, the channel, Check now with how the
-//! last look went, or a newer version with Download and Skip, and its
+//! Updates group (Check for updates and Install updates automatically, the
+//! channel, Check now with how the last look went, or a newer version with
+//! Download and Skip, its download, Restart to Update or Retry, and its
 //! release notes), then the links. A copy from a package manager, or one
 //! built from source, says so instead.
 

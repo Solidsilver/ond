@@ -115,10 +115,11 @@ impl OndApp {
             .show(ui, |ui| self.view().sidebar_playlists(ui, dragging));
     }
 
-    /// A newer Ond is out, above the footer: click for Settings › About,
-    /// with its release notes, Download and Skip.
+    /// A newer Ond is out (or downloading, or ready), above the footer:
+    /// click for Settings › About, with its release notes and what can be
+    /// done about it.
     fn update_notice(&mut self, ui: &mut Ui, v: crate::updates::Version) {
-        if kit::update_notice(ui, &format!("Ond {v} is available")).clicked() {
+        if kit::update_notice(ui, "Ond", &v, &self.updates.install).clicked() {
             self.actions.push(Action::OpenSettings(super::settings_page::Section::About));
         }
     }
@@ -438,12 +439,12 @@ impl OndApp {
         }
     }
 
-    /// The rail's gear: with a dot while a newer Ond is out, and then it opens
-    /// Settings › About.
+    /// The rail's gear: with a dot while a newer Ond is out (its tip says
+    /// whether it's downloading or ready), and then it opens Settings › About.
     fn rail_settings_button(&mut self, ui: &mut Ui) {
         let Some(v) = self.update.as_ref() else { return self.settings_button(ui) };
         let t = Tokens::of(ui);
-        let tip = format!("Settings (⌘,)\nOnd {v} is available");
+        let tip = format!("Settings (⌘,)\n{}", kit::notice_label("Ond", v, &self.updates.install));
         let button = icons::sized_button(ui, Icon::Gear, &tip, vec2(FOOTER_BUTTON, FOOTER_BUTTON), 15.0, Some(t.muted));
         kit::notice_dot(ui, button.rect);
         if button.clicked() {

@@ -945,6 +945,39 @@ fn every_view_names_its_controls() {
         h.run_steps(2);
         h.check_accessibility();
     }
+    // A newer Ond being installed, in the sidebar's notice and in About:
+    // downloading, ready, failed, unable to install itself, and the last
+    // update not having installed.
+    {
+        use crate::updates::install::{Error, Fallback, State};
+        let v = crate::updates::Version::parse("0.7.0").unwrap();
+        let states = || {
+            [
+                State::Downloading { version: v.clone(), received: 3_000_000, total: Some(24_000_000) },
+                State::preview_ready(v.clone()),
+                State::Failed { version: v.clone(), error: Error::Signature },
+                State::NotifyOnly { version: v.clone(), reason: Fallback::ReadOnly },
+            ]
+        };
+        for about in [false, true] {
+            for install in states() {
+                reset(&mut h, FULL, Route::Recent);
+                let app = app_mut(&mut h);
+                app.prefs.edit(|s| s.updates = crate::updates::UpdateCheck::Install);
+                app.update = Some(v.clone());
+                app.updates.latest = Some(v.clone());
+                app.updates.notes = Some((v.clone(), Some(Ok(Vec::new()))));
+                app.updates.install = install;
+                app.updates.install_error = Some(Error::Signature);
+                if about {
+                    app.actions.push(Action::OpenSettings(settings_page::Section::About));
+                }
+                h.run_steps(2);
+                h.check_accessibility();
+            }
+        }
+        app_mut(&mut h).prefs.edit(|s| s.updates = crate::updates::UpdateCheck::Notify);
+    }
     for (mode, size) in [(WindowMode::Player, vec2(380.0, 880.0)), (WindowMode::Mini, vec2(280.0, 280.0))] {
         reset(&mut h, size, Route::Recent);
         app_mut(&mut h).edit_windows(|w| w.mode = mode);

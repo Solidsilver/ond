@@ -229,7 +229,7 @@ impl ViewCtx<'_> {
             });
             if let Some(v) = self.update {
                 ui.add_space(6.0);
-                if kit::update_notice(ui, &format!("Rede {v} is available")).clicked() {
+                if kit::update_notice(ui, "Rede", v, &self.updates.install).clicked() {
                     self.actions.push(Action::OpenSettings(super::settings_page::Tab::About));
                 }
             }
@@ -460,12 +460,12 @@ impl ViewCtx<'_> {
         }
     }
 
-    /// The rail's gear: with a dot while a newer Rede is out, and then it
-    /// opens Settings › About.
+    /// The rail's gear: with a dot while a newer Rede is out (its tip says
+    /// whether it's downloading or ready), and then it opens Settings › About.
     fn rail_settings_button(&mut self, ui: &mut Ui) {
         let Some(v) = self.update else { return self.settings_button(ui) };
         let t = Tokens::of(ui);
-        let tip = format!("Settings (⌘,)\nRede {v} is available");
+        let tip = format!("Settings (⌘,)\n{}", kit::notice_label("Rede", v, &self.updates.install));
         let button = icons::sized_button(ui, Icon::Gear, &tip, vec2(FOOTER_BUTTON, FOOTER_BUTTON), 15.0, Some(t.muted));
         kit::notice_dot(ui, button.rect);
         if button.clicked() {

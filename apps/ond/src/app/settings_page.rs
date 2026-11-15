@@ -103,11 +103,10 @@ impl OndApp {
         }
     }
 
-    /// The app and its version, whether Ond looks for newer ones and on
-    /// which channel (copies from the GitHub releases; a package manager
-    /// updates its own), a newer
-    /// release's notes, and the few settings about the app itself rather than
-    /// about the music.
+    /// The app and its version, whether Ond looks for newer ones, installs
+    /// them itself, and on which channel (copies from the GitHub releases; a
+    /// package manager updates its own), a newer release's notes, and the few
+    /// settings about the app itself rather than about the music.
     fn about(&mut self, ui: &mut Ui) {
         let t = Tokens::of(ui);
         let current = crate::updates::current();
