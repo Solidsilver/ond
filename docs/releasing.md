@@ -4,8 +4,8 @@ The apps release independently from this repository. Release preparation belongs
 
 ## Versions and notes
 
-- **Ond 0.5.0:** workspace version in `Cargo.toml`, including the shared crates. Keep internal path-dependency version requirements in sync. Notes: `.github/release-notes/ond/v0.5.0.md`. Tag: `ond-v0.5.0`.
-- **Rede 0.1.0-beta.1:** separate package version in `apps/rede/Cargo.toml`. Notes: `.github/release-notes/rede/v0.1.0-beta.1.md`. Tag: `rede-v0.1.0-beta.1`.
+- **Ond 0.6.0:** workspace version in `Cargo.toml`, including the shared crates. Keep internal path-dependency version requirements in sync. Notes: `.github/release-notes/ond/v0.6.0.md`. Tag: `ond-v0.6.0`.
+- **Rede 0.1.0-beta.2:** separate package version in `apps/rede/Cargo.toml`. Notes: `.github/release-notes/rede/v0.1.0-beta.2.md`. Tag: `rede-v0.1.0-beta.2`.
 
 Update `Cargo.lock` with Cargo, not by upgrading every dependency. Check download filenames, documentation links and AppStream metadata. Rede's macOS marketing version is numeric (`0.1.0`); About, archive names and the release tag retain the beta suffix. Its bundle build number is the commit count.
 
@@ -50,9 +50,9 @@ Linux beta limitations must stay visible in the release notes: no browser/OpenID
 Only after checks and the merge, tag the tested `main` commit. These commands publish releases when pushed:
 
 ```sh
-git tag -a ond-v0.5.0 -m "Ond 0.5.0"
-git tag -a rede-v0.1.0-beta.1 -m "Rede 0.1.0 beta 1"
-git push origin ond-v0.5.0 rede-v0.1.0-beta.1
+git tag -a ond-v0.6.0 -m "Ond 0.6.0"
+git tag -a rede-v0.1.0-beta.2 -m "Rede 0.1.0 beta 2"
+git push origin ond-v0.6.0 rede-v0.1.0-beta.2
 ```
 
 A version mismatch stops the workflow before building. Each release waits for all of its supported platforms; Rede intentionally skips Windows. Rede's beta is a GitHub prerelease and cannot become the repository's latest stable release. Ond's update checker ignores it.

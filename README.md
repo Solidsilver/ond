@@ -1,10 +1,10 @@
 # Ond
 
-Ond is a native music player for [Navidrome](https://www.navidrome.org) and other OpenSubsonic servers, written in Rust with [egui](https://www.egui.rs). It runs on macOS, Linux and Windows. macOS is where it started and has the most complete audio path; the Linux and Windows builds are new.
+Ond is a native music player for [Navidrome](https://www.navidrome.org), other OpenSubsonic servers and local music folders, written in Rust with [egui](https://www.egui.rs). It runs on macOS, Linux and Windows. macOS is where it started and has the most complete audio path; the Linux and Windows builds are new.
 
 I wanted a client that treats playback quality as the main feature and stays out of the way otherwise. Ond plays your original files, tells you exactly what happens to the signal on its way to the speakers, and keeps the interface quiet unless you ask for more.
 
-This repository also contains **[Rede](docs/rede/README.md)**, a native Audiobookshelf player. Its first beta is available for macOS and Linux; Ond and Rede install and keep their data separately.
+This repository also contains **[Rede](docs/rede/README.md)**, a native Audiobookshelf player. Its second beta is available for macOS and Linux; Ond and Rede install and keep their data separately.
 
 Note: Ond was built using LLMs. See [AI Disclosure](#ai-disclosure)
 
@@ -22,6 +22,7 @@ Note: Ond was built using LLMs. See [AI Disclosure](#ai-disclosure)
 
 - **Bit-perfect playback on macOS and Linux.** Ond takes exclusive access to the device and switches its sample rate to match each file. On Linux it asks PipeWire (or PulseAudio) to let go of the sound card first, and gives it back a few seconds after playback stops; JACK outranks it and keeps the card when it has it. A green dot shows only when every condition holds, and Ond says why when it can't. Normal mode has ReplayGain, resampling and dither, and plays through PipeWire (or ALSA) on Linux. Windows plays through WASAPI.
 - **Gapless**, and seeking into parts of a track that haven't downloaded yet.
+- **Several sources.** Servers and local folders, one at a time or as one library, with an option to combine the same album from two sources.
 - **A local copy of your library.** Browsing and search (⌘K) don't wait on the server, and offline downloads keep playing when it's unreachable.
 - **Library analysis.** Loudness, dynamic range, and a check for files that claim to be hi-res but were upsampled or made from lossy sources.
 - **Three window modes.** Full is the whole library, Player has large artwork with the queue and lyrics, and Mini is a small square that stays on top.
@@ -31,7 +32,7 @@ The covers in the screenshot are made up.
 
 ## Install
 
-Ond downloads are on the [Ond 0.5.0 release](../../releases/tag/ond-v0.5.0) page. For the audiobook player, see [Rede's beta instructions](docs/rede/README.md).
+Ond downloads are on the [Ond 0.6.0 release](../../releases/tag/ond-v0.6.0) page. For the audiobook player, see [Rede's beta instructions](docs/rede/README.md).
 
 ### macOS
 
@@ -56,7 +57,7 @@ Ond needs PipeWire's library (`libpipewire-0.3`), which every current desktop di
 
 ### Nix and NixOS
 
-The repository is a flake. `nix run github:Solidsilver/ond` tries it, and `nix profile install github:Solidsilver/ond` installs it. In a NixOS config, use `ond.packages.${system}.default` or apply `ond.overlays.default` and use `pkgs.ond`. Add a tag to pin a release, like `github:Solidsilver/ond/ond-v0.5.0`.
+The repository is a flake. `nix run github:Solidsilver/ond` tries it, and `nix profile install github:Solidsilver/ond` installs it. In a NixOS config, use `ond.packages.${system}.default` or apply `ond.overlays.default` and use `pkgs.ond`. Add a tag to pin a release, like `github:Solidsilver/ond/ond-v0.6.0`.
 
 With Home Manager, the flake's module installs Ond and can set any of its settings. Settings set there are locked in the app, and the rest stay editable. It works on macOS too, for the app bundle. [docs/home-manager.md](docs/home-manager.md) has the setup and every setting.
 
@@ -109,7 +110,7 @@ The library database is a copy of what's on your server. If it ever breaks, Ond 
 
 ## Development
 
-The workspace has thirteen crates:
+The workspace has fifteen crates:
 
 | Crate | Job |
 |---|---|
@@ -117,6 +118,8 @@ The workspace has thirteen crates:
 | `apps/rede` (`rede`) | Rede's audiobook library, listening, downloads and UI; builds `Rede` |
 | `shell` | Shared theme, window chrome, widget toolkit and artwork-cache machinery |
 | `subsonic` | OpenSubsonic API client |
+| `accounts` | Account ids and source state shared by both apps |
+| `scan` | Local folder walker and tag reader |
 | `library` | Ond's local library mirror in redb, with hand-written indexes and migrations |
 | `abs` | Audiobookshelf API client |
 | `sources` | Rede's source-independent models and Audiobookshelf adapter |
