@@ -7,7 +7,7 @@ use crate::icons::{self, Icon};
 use crate::nav::{Nav, Route};
 use crate::theme::{Tokens, semibold};
 use accounts::{AccountId, OfflineReason, Scope, SourceColor, SourceState};
-use egui::{FontId, Rect, Sense, Ui, pos2, vec2};
+use egui::{FontId, Rect, Ui, pos2, vec2};
 use shell::kit::{self, info_row};
 
 /// What a source is called when it hasn't been given a name: a server's
@@ -26,8 +26,6 @@ pub const RAIL_W: f32 = 52.0;
 /// The footer's buttons (and the server switcher's height, in its one-line
 /// look).
 const FOOTER_BUTTON: f32 = 28.0;
-/// The notice that a newer Ond is out.
-const UPDATE_H: f32 = 28.0;
 
 /// In ⌘1…⌘6 order.
 pub(super) const PLACES: [(&str, Route, Icon); 6] = [
@@ -69,7 +67,7 @@ impl OndApp {
             }
         }
         ui.add_space(18.0);
-        let bottom_h = if self.update.is_some() { 34.0 + UPDATE_H + 6.0 } else { 34.0 };
+        let bottom_h = if self.update.is_some() { 34.0 + kit::UPDATE_NOTICE_H + 6.0 } else { 34.0 };
         if caps.playlists {
             self.playlists_section(ui, bottom_h);
         }
@@ -120,17 +118,7 @@ impl OndApp {
     /// A newer Ond is out, above the footer: click for Settings › About,
     /// with its release notes, Download and Skip.
     fn update_notice(&mut self, ui: &mut Ui, v: crate::updates::Version) {
-        let t = Tokens::of(ui);
-        let label = format!("Ond {v} is available");
-        let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), UPDATE_H), Sense::click());
-        if ui.is_rect_visible(rect) {
-            let p = ui.painter();
-            p.rect_filled(rect, 6.0, t.accent.gamma_multiply(if resp.hovered() { 0.2 } else { 0.12 }));
-            icons::paint(p, Rect::from_center_size(pos2(rect.left() + 16.0, rect.center().y), vec2(12.0, 12.0)), Icon::Download, t.accent);
-            p.text(pos2(rect.left() + 30.0, rect.center().y), egui::Align2::LEFT_CENTER, &label, FontId::proportional(12.5), t.accent);
-        }
-        resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &label));
-        if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+        if kit::update_notice(ui, &format!("Ond {v} is available")).clicked() {
             self.actions.push(Action::OpenSettings(super::settings_page::Section::About));
         }
     }
@@ -457,9 +445,7 @@ impl OndApp {
         let t = Tokens::of(ui);
         let tip = format!("Settings (⌘,)\nOnd {v} is available");
         let button = icons::sized_button(ui, Icon::Gear, &tip, vec2(FOOTER_BUTTON, FOOTER_BUTTON), 15.0, Some(t.muted));
-        let dot = pos2(button.rect.center().x + 6.0, button.rect.center().y - 6.0);
-        ui.painter().circle_filled(dot, 4.0, t.sidebar);
-        ui.painter().circle_filled(dot, 3.0, t.accent);
+        kit::notice_dot(ui, button.rect);
         if button.clicked() {
             self.actions.push(Action::OpenSettings(super::settings_page::Section::About));
         }
