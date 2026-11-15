@@ -55,6 +55,13 @@ Files fetched by the app itself carry no quarantine attribute, so Gatekeeper doe
 
 A running `.exe` can be renamed but not overwritten. The app renames `Ond.exe` to `Ond.exe.old`, moves the new one in, and deletes `Ond.exe.old` on the next launch ([`self-replace`](https://docs.rs/self-replace) does this). A file the app downloads itself carries no Mark of the Web, so SmartScreen doesn't warn again. A folder the user can't write to falls back to `notify`.
 
+For Restart to Update, the new Windows process receives `--after-update <pid>`.
+Both apps handle this before opening logs, settings or databases. They request
+only synchronization access to the predecessor and wait for its exit for at
+most 30 seconds. A timeout or access failure stops startup before opening the
+library. Invalid arguments, zero, the current PID, signs, whitespace and
+non-decimal values are ignored; repeated flags cannot extend the wait.
+
 ## Signing
 
 HTTPS proves a file came from GitHub, not that it came from us: anyone who could publish a release could otherwise run code on every machine set to `install`. So every release file is signed with [minisign](https://jedisct1.github.io/minisign/) (Ed25519):

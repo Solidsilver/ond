@@ -55,10 +55,54 @@ pub(super) fn install(prepared: Prepared, relaunch: bool) -> Result<(), Error> {
         fs::rename(&old, target)?;
         return Err(error.into());
     }
-    if relaunch && let Err(error) = Command::new(target).spawn() {
+    if relaunch && let Err(error) = Command::new(target).arg("--after-update").arg(std::process::id().to_string()).spawn() {
         fs::remove_file(target)?;
         fs::rename(&old, target)?;
         return Err(error.into());
     }
     Ok(())
+}
+
+/// A process handle stays tied to this predecessor even if Windows later
+/// reuses its PID. Request only synchronization access and never wait forever.
+pub(super) fn wait_for_predecessor(pid: u32, timeout: std::time::Duration) -> std::io::Result<()> {
+    use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+    use windows_sys::Win32::Foundation::{ERROR_INVALID_PARAMETER, WAIT_OBJECT_0, WAIT_TIMEOUT};
+    use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject};
+
+    let raw = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, pid) };
+    if raw.is_null() {
+        let error = std::io::Error::last_os_error();
+        // The predecessor may have exited before the new image reached main.
+        if error.raw_os_error() == Some(ERROR_INVALID_PARAMETER as i32) {
+            return Ok(());
+        }
+        return Err(error);
+    }
+    // OpenProcess returned a non-null, owned handle; RAII keeps it open across
+    // the wait and closes it on every result path.
+    let process = unsafe { OwnedHandle::from_raw_handle(raw) };
+    let milliseconds = timeout.as_millis().min(30_000) as u32;
+    match unsafe { WaitForSingleObject(process.as_raw_handle(), milliseconds) } {
+        WAIT_OBJECT_0 => Ok(()),
+        WAIT_TIMEOUT => Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "the previous app is still running")),
+        _ => Err(std::io::Error::last_os_error()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::process::Stdio;
+    use std::time::Duration;
+
+    #[test]
+    fn waiting_is_bounded_and_succeeds_once_the_predecessor_exits() {
+        let mut child = Command::new("cmd").args(["/C", "more >NUL"]).stdin(Stdio::piped()).spawn().unwrap();
+        let error = wait_for_predecessor(child.id(), Duration::ZERO).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        drop(child.stdin.take());
+        child.wait().unwrap();
+        wait_for_predecessor(child.id(), Duration::ZERO).unwrap();
+    }
 }

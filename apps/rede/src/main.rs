@@ -34,6 +34,7 @@ mod window;
 pub(crate) const MIN_SIZE: [f32; 2] = [640.0, 420.0];
 
 fn main() -> eframe::Result {
+    shell::updates::install::wait_for_predecessor().map_err(|error| eframe::Error::AppCreation(Box::new(error)))?;
     init_logging();
     #[cfg(target_os = "macos")]
     openid::macos::install();

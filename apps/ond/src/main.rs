@@ -48,6 +48,7 @@ mod window;
 use shell::{chrome, csd, icons, theme};
 
 fn main() -> eframe::Result {
+    shell::updates::install::wait_for_predecessor().map_err(|error| eframe::Error::AppCreation(Box::new(error)))?;
     init_logging();
 
     // Reopen in the mode (and place) the app was left in.

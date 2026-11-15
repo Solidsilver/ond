@@ -163,9 +163,12 @@ not claims that signed production updates have been installed successfully:
   failure and relaunch the correct path only for Restart. Test Restart and Quit
   while playing; ordinary Quit must stay closed even after rollback.
 - [ ] On Windows x86_64, test Ond's executable rename/relaunch on a real desktop,
-  `.old` cleanup after the previous process exits, a read-only directory and a
+  the new process waiting for its predecessor before opening redb, `.old`
+  cleanup after the previous process exits, a read-only directory and a
   failed replacement/relaunch with rollback. Rede has no Windows release and
   must report UnsupportedPlatform rather than attempt to fetch Ond's archive.
+  Keep the old process alive: startup must stop after at most 30 seconds and
+  leave its database untouched. Invalid `--after-update` arguments must not wait.
 - [ ] Interrupt downloads and relaunch; skip or change channel/mode during a
   download and after Ready. No partial, skipped or superseded update installs.
   Try missing, corrupt and wrong-file signatures. Progress stops repainting

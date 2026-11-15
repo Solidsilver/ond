@@ -287,6 +287,29 @@ fn prepare(stage: stage::Stage, plan: Plan, app: &Releases) -> Result<Prepared, 
     Err(Error::Archive)
 }
 
+/// Called by each app before opening logs, settings or databases. Windows
+/// update restarts wait for the previous process to release its resources;
+/// a timeout or access error stops startup rather than racing its databases.
+pub fn wait_for_predecessor() -> Result<(), Error> {
+    #[cfg(target_os = "windows")]
+    if let Some(pid) = predecessor(std::env::args_os().skip(1)) {
+        windows::wait_for_predecessor(pid, Duration::from_secs(30))?;
+    }
+    Ok(())
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn predecessor(mut args: impl Iterator<Item = std::ffi::OsString>) -> Option<u32> {
+    args.find(|arg| arg == "--after-update")?;
+    let value = args.next()?;
+    let value = value.to_str()?;
+    if value.is_empty() || !value.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let pid = value.parse::<u32>().ok()?;
+    (pid != 0 && pid != std::process::id()).then_some(pid)
+}
+
 /// Removes stale downloads and reports an earlier helper failure once, on
 /// the next launch. This also releases Windows' previous executable image.
 pub fn startup(root: &Path) -> Result<(), Error> {

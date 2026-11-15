@@ -417,3 +417,20 @@ fn the_helper_relaunches_only_for_restart_on_success_and_after_rollback() {
         }
     }
 }
+
+#[test]
+fn only_one_plain_predecessor_pid_can_request_a_startup_wait() {
+    fn parse(args: &[&str]) -> Option<u32> {
+        predecessor(args.iter().map(std::ffi::OsString::from))
+    }
+    assert_eq!(parse(&["--after-update", "42"]), Some(42));
+    assert_eq!(parse(&["other", "--after-update", "42", "--after-update", "43"]), Some(42));
+    assert_eq!(parse(&["--after-update", "bad", "--after-update", "43"]), None);
+    for invalid in ["", "0", "-42", "+42", " 42", "42 ", "0x2a", "4.2", "４２", "4294967296"] {
+        assert_eq!(parse(&["--after-update", invalid]), None, "{invalid:?}");
+    }
+    assert_eq!(parse(&["--after-update", &std::process::id().to_string()]), None);
+    assert_eq!(parse(&["--after-update"]), None);
+    assert_eq!(parse(&["--after-update=42"]), None);
+    assert_eq!(parse(&[]), None);
+}
