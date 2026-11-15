@@ -40,6 +40,14 @@ if name == "cargo":
         target /= "release"
         target.mkdir(parents=True, exist_ok=True)
         (target / ("Ond" if package == "ond-player" else "Rede")).write_text("fixture binary\n")
+elif name == "minisign":
+    key = Path(args[args.index("-s") + 1])
+    password = sys.stdin.read()
+    with open(os.environ["TOOL_LOG"], "a") as log:
+        log.write(json.dumps(["sign-input", key.read_text(), password, str(key)]) + "\n")
+    if os.environ.get("FAIL_SIGN"):
+        sys.exit(1)
+    Path(args[args.index("-m") + 1] + ".minisig").write_text("fixture signature")
 elif name == "uname":
     print("x86_64")
 elif name == "git":
@@ -68,7 +76,7 @@ class ReleaseTests(unittest.TestCase):
             shutil.copy2(ROOT / name, self.root / name)
         self.bin = self.root / "bin"
         self.bin.mkdir()
-        for name in ["cargo", "uname", "git", "lipo", "hdiutil", "ditto", "codesign", "plutil", "xcrun", "spctl", "sleep", "update-desktop-database", "gtk-update-icon-cache"]:
+        for name in ["minisign", "cargo", "uname", "git", "lipo", "hdiutil", "ditto", "codesign", "plutil", "xcrun", "spctl", "sleep", "update-desktop-database", "gtk-update-icon-cache"]:
             path = self.bin / name
             path.write_text(MOCK)
             path.chmod(0o755)
@@ -97,6 +105,44 @@ class ReleaseTests(unittest.TestCase):
 
     def calls(self):
         return [json.loads(line) for line in (self.root / "tools.jsonl").read_text().splitlines()]
+
+    def test_every_release_file_is_signed_with_the_password_on_stdin_and_the_key_is_removed(self):
+        dist = self.root / "dist"
+        dist.mkdir()
+        for name in ["Ond-macos.zip", "Rede-linux.tar.gz", "Ond-windows.zip", "Ond.dmg"]:
+            (dist / name).write_text("release fixture")
+        self.run_script(
+            "scripts/sign-updates.sh", str(dist),
+            UPDATE_SIGNING_KEY="encrypted fixture key", UPDATE_SIGNING_PASSWORD="fixture password",
+        )
+        self.assertEqual(len(list(dist.glob("*.minisig"))), 4)
+        inputs = [call for call in self.calls() if call[0] == "sign-input"]
+        self.assertEqual(len(inputs), 4)
+        for _, key, password, path in inputs:
+            self.assertEqual(key, "encrypted fixture key\n")
+            self.assertEqual(password, "fixture password\n")
+            self.assertFalse(Path(path).exists())
+        self.assertFalse(any("fixture password" in arg for call in self.calls() if call[0] == "minisign" for arg in call))
+        workflow = (ROOT / ".github/workflows/release.yml").read_text()
+        self.assertIn("secrets.UPDATE_SIGNING_KEY", workflow)
+        self.assertIn("secrets.UPDATE_SIGNING_PASSWORD", workflow)
+        self.assertIn("sha256sum --check", workflow)
+        self.assertIn("run: bash scripts/sign-updates.sh dist", workflow)
+        self.assertIn("files: dist/*", workflow)
+
+    def test_unsigned_publication_warns_and_a_broken_configured_key_stops_publication(self):
+        dist = self.root / "dist"
+        dist.mkdir()
+        (dist / "Ond.zip").write_text("release fixture")
+        out = self.run_script("scripts/sign-updates.sh", str(dist), UPDATE_SIGNING_KEY="").stdout
+        self.assertIn("::warning::", out)
+        self.assertFalse(list(dist.glob("*.minisig")))
+        self.run_script(
+            "scripts/sign-updates.sh", str(dist), success=False,
+            UPDATE_SIGNING_KEY="broken key", UPDATE_SIGNING_PASSWORD="password", FAIL_SIGN="1",
+        )
+        key_path = next(call[3] for call in self.calls() if call[0] == "sign-input")
+        self.assertFalse(Path(key_path).exists())
 
     def test_each_tag_selects_only_its_own_app_and_exact_version(self):
         for tag, app, version, pre in [

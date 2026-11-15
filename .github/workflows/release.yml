@@ -209,7 +209,9 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          sparse-checkout: .github/release-notes
+          sparse-checkout: |
+            .github/release-notes
+            scripts
           # The tags, to find this app's previous release.
           fetch-depth: 0
 
@@ -217,6 +219,19 @@ jobs:
         with:
           path: dist
           merge-multiple: true
+
+      - name: Install minisign 0.12
+        run: |
+          curl --fail --location --retry 3 https://github.com/jedisct1/minisign/releases/download/0.12/minisign-0.12-linux.tar.gz -o "$RUNNER_TEMP/minisign.tar.gz"
+          echo "9a599b48ba6eb7b1e80f12f36b94ceca7c00b7a5173c95c3efc88d9822957e73  $RUNNER_TEMP/minisign.tar.gz" | sha256sum --check
+          tar -xzf "$RUNNER_TEMP/minisign.tar.gz" -C "$RUNNER_TEMP" minisign-linux/x86_64/minisign
+          sudo install -m755 "$RUNNER_TEMP/minisign-linux/x86_64/minisign" /usr/local/bin/minisign
+
+      - name: Sign update files
+        env:
+          UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
+          UPDATE_SIGNING_PASSWORD: ${{ secrets.UPDATE_SIGNING_PASSWORD }}
+        run: bash scripts/sign-updates.sh dist
 
       # Hand-written notes for this version, if there are any, above GitHub's
       # changelog: .github/release-notes/ond/v0.5.0.md for ond-v0.5.0 (or v0.5.0).
