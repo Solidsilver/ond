@@ -1,17 +1,17 @@
 //! What an app says about its own updates, drawn alike in both: About's
-//! [`about_updates`] (the Updates group, and a newer version's release notes
+//! [`about_updates`] (the Updates group with its channel, and a newer version's release notes
 //! under it) and the sidebar's [`update_notice`] above its foot, with the
 //! [`notice_dot`] a rail's gear wears instead. The app holds the state
 //! ([`Updates`]) and the preferences; these only draw them and say what was
 //! asked for as [`UpdateAction`]s.
 
 use super::buttons::{primary, secondary};
-use super::controls::switch;
+use super::controls::{choice, switch};
 use super::rows::{Head, group, managed, row_with};
 use super::text::link;
 use crate::icons::{self, Icon};
 use crate::theme::{Tokens, semibold};
-use crate::updates::{Block, Channel, UpdateAction, UpdateCheck, Updates, Version};
+use crate::updates::{Block, Channel, UpdateAction, UpdateChannel, UpdateCheck, Updates, Version};
 use egui::{FontId, Rect, Response, Sense, Ui, pos2, vec2};
 
 /// The sidebar's update notice: as tall as the foot's buttons.
@@ -27,6 +27,8 @@ pub struct AboutUpdates<'a> {
     pub distribution: Channel,
     pub updates: &'a Updates,
     pub check: UpdateCheck,
+    /// The channel the user picked; `None` follows the build.
+    pub channel: Option<UpdateChannel>,
     /// The version the user skipped, as saved.
     pub skipped: Option<&'a str>,
     /// Under Check for updates: how often the app looks, and where.
@@ -34,10 +36,13 @@ pub struct AboutUpdates<'a> {
     /// Why Check for updates can't be changed, when something outside the
     /// app sets it (Ond's managed.json): the row is locked and says so.
     pub check_locked: Option<&'a str>,
+    /// The same for Channel.
+    pub channel_locked: Option<&'a str>,
 }
 
-/// About's Updates group: for a GitHub copy, Check for updates, then a newer
-/// version with Download and Skip, or how the last look went with Check now;
+/// About's Updates group: for a GitHub copy, Check for updates and the
+/// Channel (Releases or Betas, the build's own until the user picks), then a
+/// newer version with Download and Skip, or how the last look went with Check now;
 /// for any other, where its updates come from. A newer version's release
 /// notes follow in a group of their own, asked for the first time they're
 /// drawn. Returns what was asked for, in order.
@@ -51,6 +56,9 @@ pub fn about_updates(ui: &mut Ui, about: &AboutUpdates<'_>) -> Vec<UpdateAction>
             if managed(ui, about.check_locked.is_some(), |ui| row_with(ui, head, |ui| switch(ui, &mut on, "Check for updates")).changed()) {
                 asked.push(UpdateAction::Check(if on { UpdateCheck::Notify } else { UpdateCheck::Off }));
             }
+            if let Some(channel) = channel_row(ui, about) {
+                asked.push(UpdateAction::Channel(Some(channel)));
+            }
             update_status(ui, about, newer.clone(), &mut asked);
         }
         Channel::Packaged(by) => row(ui, &format!("Updates come from {by}"), ""),
@@ -60,6 +68,22 @@ pub fn about_updates(ui: &mut Ui, about: &AboutUpdates<'_>) -> Vec<UpdateAction>
         release_notes(ui, about, v, &mut asked);
     }
     asked
+}
+
+/// Releases or Betas. Until the user picks, it shows the one the build
+/// follows and says so; a pick is returned.
+fn channel_row(ui: &mut Ui, about: &AboutUpdates<'_>) -> Option<UpdateChannel> {
+    let mut pick = UpdateChannel::effective(about.channel, about.current);
+    let hint = match about.channel {
+        None if about.current.is_prerelease() => "Follows this build, which is a beta.",
+        None => "Follows this build, which is a full release.",
+        Some(UpdateChannel::Releases) => "Full releases only.",
+        Some(UpdateChannel::Betas) => "Betas as well as full releases. A beta may have rough edges.",
+    };
+    let head = Head { label: "Channel", hint, tag: about.channel_locked, ..Default::default() };
+    let all = [UpdateChannel::Releases, UpdateChannel::Betas];
+    let changed = managed(ui, about.channel_locked.is_some(), |ui| row_with(ui, head, |ui| choice(ui, &all, &mut pick, None, |c| c.label().into())));
+    changed.then_some(pick)
 }
 
 /// A row with nothing to change.
@@ -73,7 +97,8 @@ fn update_status(ui: &mut Ui, about: &AboutUpdates<'_>, newer: Option<Version>, 
     let (app, current, u) = (about.app, about.current, about.updates);
     if let Some(v) = newer {
         let skipped = about.skipped == Some(&v.to_string());
-        let hint = if skipped { format!("You have {current}. You skipped this version.") } else { format!("You have {current}.") };
+        let beta = if v.is_prerelease() { "A beta. " } else { "" };
+        let hint = if skipped { format!("{beta}You have {current}. You skipped this version.") } else { format!("{beta}You have {current}.") };
         row_with(ui, Head { label: &format!("{app} {v} is available"), hint: &hint, ..Default::default() }, |ui| {
             if primary(ui, Some(Icon::Download), "Download").clicked() {
                 asked.push(UpdateAction::Open(v.clone()));
@@ -185,4 +210,75 @@ pub fn notice_dot(ui: &Ui, button: Rect) {
     let dot = pos2(button.center().x + 6.0, button.center().y - 6.0);
     ui.painter().circle_filled(dot, 4.0, t.sidebar);
     ui.painter().circle_filled(dot, 3.0, t.accent);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::kit::themed;
+    use egui_kittest::kittest::Queryable;
+
+    struct Page {
+        channel: Option<UpdateChannel>,
+        locked: Option<&'static str>,
+        updates: Updates,
+        picked: Vec<Option<UpdateChannel>>,
+    }
+
+    fn harness(channel: Option<UpdateChannel>, locked: Option<&'static str>, updates: Updates) -> egui_kittest::Harness<'static, (bool, Page)> {
+        let current = Version::parse("0.6.0").unwrap();
+        let mut h = themed(Page { channel, locked, updates, picked: Vec::new() }, move |ui, page: &mut Page| {
+            ui.set_width(560.0);
+            let about = AboutUpdates {
+                app: "Ond",
+                current: &current,
+                distribution: Channel::GitHub,
+                updates: &page.updates,
+                check: UpdateCheck::Notify,
+                channel: page.channel,
+                skipped: None,
+                hint: "Once a day.",
+                check_locked: None,
+                channel_locked: page.locked,
+            };
+            for asked in about_updates(ui, &about) {
+                if let UpdateAction::Channel(c) = asked {
+                    page.picked.push(c);
+                }
+            }
+        });
+        h.set_size(vec2(600.0, 700.0));
+        h.run();
+        h
+    }
+
+    #[test]
+    fn the_channel_follows_the_build_until_picked_and_hands_back_the_pick() {
+        let mut h = harness(None, None, Updates::default());
+        h.get_by_label_contains("Follows this build, which is a full release.");
+        h.check_accessibility();
+        h.get_by_label("Betas").click();
+        h.run();
+        assert_eq!(h.state().1.picked, vec![Some(UpdateChannel::Betas)]);
+    }
+
+    #[test]
+    fn a_locked_channel_says_why_and_takes_no_pick() {
+        let mut h = harness(Some(UpdateChannel::Releases), Some("Set in your Nix config"), Updates::default());
+        h.get_by_label_contains("Set in your Nix config");
+        h.get_by_label("Betas").click();
+        h.run();
+        assert!(h.state().1.picked.is_empty());
+    }
+
+    #[test]
+    fn a_newer_beta_is_offered_as_one_with_its_notes_asked_for() {
+        let beta = Version::parse("0.7.0-beta.1").unwrap();
+        let updates = Updates { latest: Some(beta), ..Default::default() };
+        let h = harness(Some(UpdateChannel::Betas), None, updates);
+        h.get_by_label("Ond 0.7.0-beta.1 is available");
+        h.get_by_label_contains("A beta. You have 0.6.0.");
+        h.get_by_label("Loading the release notes…");
+        h.check_accessibility();
+    }
 }

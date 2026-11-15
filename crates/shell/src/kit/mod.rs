@@ -99,7 +99,7 @@
 //!   [`Toasts::note`] fades with its button (an Undo).
 //! - [`updates`](mod@updates): what an app says about its own updates:
 //!   About's [`about_updates`] (drawn from [`AboutUpdates`]: Check for
-//!   updates, how the last look went or a newer version with Download and
+//!   updates, the channel, how the last look went or a newer version with Download and
 //!   Skip, and its release notes), the sidebar's [`update_notice`] and the
 //!   rail's [`notice_dot`].
 

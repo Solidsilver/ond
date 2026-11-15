@@ -103,8 +103,9 @@ impl OndApp {
         }
     }
 
-    /// The app and its version, whether Ond looks for newer ones (copies
-    /// from the GitHub releases; a package manager updates its own), a newer
+    /// The app and its version, whether Ond looks for newer ones and on
+    /// which channel (copies from the GitHub releases; a package manager
+    /// updates its own), a newer
     /// release's notes, and the few settings about the app itself rather than
     /// about the music.
     fn about(&mut self, ui: &mut Ui) {
@@ -113,16 +114,17 @@ impl OndApp {
         let icon = kit::app_icon(ui.ctx(), "ond", include_bytes!("../../../../packaging/linux/hicolor/256x256/apps/dev.solidsilver.ond.png"));
         kit::about_header(ui, &icon, "Ond", &format!("Version {current}"));
         ui.add_space(20.0);
-        let skipped = self.prefs.get(|s| s.skipped_update.clone());
         let about = kit::AboutUpdates {
             app: "Ond",
             current: &current,
             distribution: crate::updates::channel(),
             updates: &self.updates,
-            check: self.prefs.get(|s| s.updates),
-            skipped: skipped.as_deref(),
+            check: self.ui.prefs.updates,
+            channel: self.ui.prefs.update_channel,
+            skipped: self.ui.prefs.skipped_update.as_deref(),
             hint: "Once a day, Ond looks on GitHub for a newer version and tells you when there is one.",
             check_locked: self.prefs.managed("updates").then_some(crate::managed::LOCKED),
+            channel_locked: self.prefs.managed("update_channel").then_some(crate::managed::LOCKED),
         };
         let asked = kit::about_updates(ui, &about);
         self.actions.extend(asked.into_iter().map(Action::Update));

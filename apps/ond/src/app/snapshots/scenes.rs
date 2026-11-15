@@ -532,6 +532,32 @@ fn scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
     app_mut(h).updates.checked = Some(std::time::SystemTime::now() - std::time::Duration::from_secs(2 * 3600));
     app_mut(h).actions.push(Action::OpenSettings(settings_page::Section::About));
     s.shoot(h, "about-up-to-date");
+    // The channel picked rather than followed, then a beta offered on it
+    // with its notes, in a narrow window and a full one (full last, so the
+    // Settings window the next scenes open starts where they expect it).
+    reset(h, FULL, Route::Recent);
+    app_mut(h).prefs.edit(|s| s.update_channel = Some(crate::updates::UpdateChannel::Betas));
+    app_mut(h).updates.checked = Some(std::time::SystemTime::now() - std::time::Duration::from_secs(2 * 3600));
+    app_mut(h).actions.push(Action::OpenSettings(settings_page::Section::About));
+    s.shoot(h, "about-channel-betas");
+    let beta = crate::updates::Version::parse("99.0.0-beta.1").unwrap();
+    for (size, scene) in [(vec2(720.0, 600.0), "about-beta-available-narrow"), (FULL, "about-beta-available")] {
+        reset(h, size, Route::Recent);
+        let app = app_mut(h);
+        app.prefs.edit(|s| s.update_channel = Some(crate::updates::UpdateChannel::Betas));
+        app.update = Some(beta.clone());
+        app.updates.latest = Some(beta.clone());
+        app.updates.notes = Some((
+            beta.clone(),
+            Some(Ok(vec![
+                crate::updates::Block::Paragraph("A first look at what comes next.".into()),
+                crate::updates::Block::Heading("Updates".into()),
+                crate::updates::Block::Bullet("Settings › About has a Channel: Releases, or Betas as well.".into()),
+            ])),
+        ));
+        app.actions.push(Action::OpenSettings(settings_page::Section::About));
+        s.shoot(h, scene);
+    }
 
     // Another accent color: everything accented takes it, in either theme.
     reset(h, FULL, Route::Album(album_id(0)));

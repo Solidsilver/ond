@@ -787,6 +787,7 @@ pub(super) const MANAGED: &str = r#"{
   "output_device": "umc",
   "offline_limit_gb": 50,
   "experimental": { "visualizer": true },
+  "update_channel": "releases",
   "volume": 0.2
 }"#;
 
