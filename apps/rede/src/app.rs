@@ -9,6 +9,7 @@
 //! actions and messages each one handles are in their own modules:
 //!
 //! - `session`: signing in, resuming, and signing out
+//! - `onboarding`: the first-run sheet the sign-in form is drawn in
 //! - `library`: the books the shelf has, in the order drawn
 //! - `home`: the books in progress and the newest
 //! - `progress`: where each book is, and how a cover says it
@@ -30,6 +31,8 @@
 //! - `sheets`: the keyboard shortcuts, Settings and the sign-out question,
 //!   over the window
 //! - `settings_page`: Settings' tabs and what's on them (⌘,)
+//! - `manage`: what the Sources tab does to an account (rename, recolour,
+//!   sign out, remove)
 //! - `panel`: the chapters column at the right
 //! - `ui_state`: the notice line, the toasts, the trail, and what a frame
 //!   reads
@@ -69,7 +72,9 @@ mod downloads;
 mod downloads_page;
 mod home;
 mod library;
+mod manage;
 mod nav;
+mod onboarding;
 mod palette;
 mod panel;
 mod player_view;
@@ -153,23 +158,33 @@ pub enum Action {
     /// new one.
     ReopenBrowser,
     CancelSignIn,
+    /// Something done on the first-run sheet.
+    Onboarding(shell::kit::OnboardingEvent),
     /// Ask before signing out: playback stops and the sign-in has to be
     /// done again.
     AskSignOut,
     /// Back to the sign-in screen; the saved tokens are forgotten. The shelf
     /// and its books stay.
     SignOut,
+    /// Open another configured account, stopping playback and flushing any
+    /// pending progress from the current one first.
+    SwitchAccount(accounts::AccountId),
+    /// The first-run sheet over the account in view, to sign in to another
+    /// (the switcher's Add source…).
+    AddSource,
     /// List the libraries and write what changed. A sync already running
     /// isn't started twice.
     SyncNow,
+    /// A change to one account from Settings' Sources tab.
+    Source(manage::SourceAction),
     /// The library's order, and anything else a setting changes.
     Prefs(PrefsAction),
     PlayBook(String),
     /// Keep the book on this computer: its details are fetched first, then
     /// the store queues its files.
-    DownloadBook(sources::ItemKey),
+    DownloadBook(accounts::ItemKey),
     /// The book's download goes, finished or not.
-    RemoveDownload(sources::ItemKey),
+    RemoveDownload(accounts::ItemKey),
     /// Every download waits (true) or goes on.
     PauseDownloads(bool),
     /// The downloads that gave up are tried again.
@@ -192,21 +207,21 @@ pub enum Action {
     /// moves there and stays as it was: paused or playing.
     StartOver(String),
     AddBookmark {
-        item: sources::ItemKey,
+        item: accounts::ItemKey,
         time: f64,
         title: String,
     },
     RenameBookmark {
-        item: sources::ItemKey,
+        item: accounts::ItemKey,
         time: f64,
         title: String,
     },
     DeleteBookmark {
-        item: sources::ItemKey,
+        item: accounts::ItemKey,
         time: f64,
     },
     JumpToBookmark {
-        item: sources::ItemKey,
+        item: accounts::ItemKey,
         time: f64,
     },
     UndoReconcile,
@@ -254,6 +269,9 @@ pub struct RedeApp {
     /// Who's signed in, and what their shelf is.
     session: Session,
     login: Option<LoginForm>,
+    /// Where the first-run sheet is, while it's up (first run, or after
+    /// signing out).
+    onboarding: Option<shell::kit::OnboardingStep>,
     openid: crate::openid::State,
     /// The shelf's books, and the order they're drawn in.
     books: Books,
@@ -302,6 +320,21 @@ impl RedeApp {
     }
 
     fn build(ctx: &egui::Context, paths: Paths) -> anyhow::Result<Self> {
+        Self::build_with(ctx, paths, Keeper::start(), |_| {})
+    }
+
+    #[cfg(test)]
+    pub(super) fn build_with_store<S>(ctx: &egui::Context, paths: Paths, store: std::sync::Arc<S>) -> anyhow::Result<Self>
+    where
+        S: Send + Sync + 'static,
+        std::sync::Arc<S>: crate::tokens::TokenStore + crate::tokens::TokenLoad,
+    {
+        Self::build_with(ctx, paths, Keeper::with_store(store.clone()), |bridge| {
+            bridge.use_token_store(store);
+        })
+    }
+
+    fn build_with(ctx: &egui::Context, paths: Paths, keeper: Keeper, configure: impl FnOnce(&mut Bridge)) -> anyhow::Result<Self> {
         // Two workers: the shelf's writes and the server's calls, so a listing
         // doesn't hold up a book's details.
         let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build()?;
@@ -309,7 +342,8 @@ impl RedeApp {
         let (prefs, loaded) = Prefs::open(&paths.config_file);
         let (tx, inbox) = channel();
         let repaint = ctx.clone();
-        let bridge = Bridge::new(rt.handle().clone(), tx, std::sync::Arc::new(move || repaint.request_repaint()), Keeper::start(), paths.clone());
+        let mut bridge = Bridge::new(rt.handle().clone(), tx, std::sync::Arc::new(move || repaint.request_repaint()), keeper, paths.clone());
+        configure(&mut bridge);
         let saved = prefs.snapshot();
         theme::install(ctx, saved.theme);
         // Before the first frame, so the window never shows at 100% first.
@@ -321,13 +355,21 @@ impl RedeApp {
             ui.notice =
                 Some(Notice::error(format!("Your settings couldn't be read, so Rede started fresh. Sign in again. The old file is at {}.", aside.display())));
         }
-        // A saved account is resumed with the tokens the keyring kept; without
-        // one, the sign-in form starts empty.
-        let login = saved.account().is_none().then(LoginForm::default);
+        // A saved account is resumed with the tokens the keyring kept unless
+        // the user signed out of it; without one, the sign-in form starts
+        // empty.
+        let active = saved.account().cloned();
+        let login = match active.as_ref() {
+            Some(account) if account.signed_out => Some(LoginForm::for_account(Some(account))),
+            Some(_) => None,
+            None => Some(LoginForm::default()),
+        };
+        let onboarding = login.is_some().then(shell::kit::OnboardingStep::default);
         #[cfg(target_os = "macos")]
         shell::now_playing::intervals(f64::from(saved.playback.skip_back), f64::from(saved.playback.skip_forward));
-        if let Some(account) = saved.account() {
-            bridge.start(account.clone());
+        let connecting = active.as_ref().is_some_and(|a| !a.signed_out);
+        if let Some(account) = active.filter(|a| !a.signed_out) {
+            bridge.start(account);
         }
         Ok(Self {
             _rt: AppRuntime(Some(rt)),
@@ -337,8 +379,9 @@ impl RedeApp {
             prefs,
             shown,
             art,
-            session: Session { connecting: saved.account().is_some(), ..Session::default() },
+            session: Session { connecting, ..Session::default() },
             login,
+            onboarding,
             openid: Default::default(),
             books: Books::default(),
             sync: SyncState::default(),
@@ -392,12 +435,12 @@ impl RedeApp {
                 }
                 m => self.handle_sign_in(m),
             },
-            Msg::Library(m) => match m {
+            Msg::Library { session, event } if session == self.bridge.session() => match event {
                 LibraryMsg::Books(books) => {
                     if self.session.source.is_some()
                         && let (Some(account), Some(shelf)) = (&self.session.account, &self.session.shelf)
                     {
-                        self.bridge.positions(shelf.clone(), books.iter().map(|book| sources::ItemKey::new(account.id, &book.id)).collect());
+                        self.bridge.positions(shelf.clone(), books.iter().map(|book| accounts::ItemKey::new(account.id, &book.id)).collect());
                     }
                     self.books.set(books);
                 }
@@ -406,7 +449,8 @@ impl RedeApp {
                 LibraryMsg::Book { key, item } => self.books.loaded(&key.item, *item),
                 LibraryMsg::BookFailed { key, error } => self.books.failed(&key.item, error),
             },
-            Msg::Stats { log, history } => {
+            Msg::Library { .. } => {}
+            Msg::Stats { session, log, history } if session == self.bridge.session() => {
                 // No answer means the server's gone, as anywhere else; any
                 // other reason is the page's to say.
                 if let Some(Err(e)) = &history
@@ -416,6 +460,7 @@ impl RedeApp {
                 }
                 self.stats.arrived(log, history);
             }
+            Msg::Stats { .. } => {}
             Msg::Bookmarks { session, event } if session == self.bridge.session() => self.bookmark_event(event),
             Msg::Bookmarks { .. } => {}
             Msg::Playback { session, event } if session == self.bridge.session() => self.playback_event(event),
@@ -436,7 +481,8 @@ impl RedeApp {
                     shell::now_playing::set_artwork(id, bytes);
                 }
             }
-            Msg::Error(e) => self.show_failure(e),
+            Msg::Error { session, error } if session == self.bridge.session() => self.show_failure(error),
+            Msg::Error { .. } => {}
         }
     }
 
@@ -488,6 +534,7 @@ impl RedeApp {
             Action::OpenId => self.begin_openid(),
             Action::ReopenBrowser => self.reopen_browser(),
             Action::CancelSignIn => self.cancel_sign_in(abs::OpenIdError::Cancelled),
+            Action::Onboarding(event) => self.onboarding_event(event),
             Action::AskSignOut => {
                 let from_settings = self.sheet == Some(sheets::Sheet::Settings);
                 self.sheet = Some(sheets::Sheet::SignOut { from_settings });
@@ -496,7 +543,16 @@ impl RedeApp {
                 self.sheet = None;
                 self.sign_out();
             }
+            Action::SwitchAccount(id) => {
+                self.sheet = None;
+                self.switch_account(id);
+            }
+            Action::AddSource => {
+                self.sheet = None;
+                self.add_source();
+            }
             Action::SyncNow => self.sync_now(),
+            Action::Source(a) => self.source_action(a),
             Action::Prefs(a) => self.apply_prefs(a),
             Action::DownloadBook(key) => self.download_book(key),
             Action::RemoveDownload(key) => self.remove_download(&key),
@@ -548,7 +604,15 @@ impl RedeApp {
             }
             Action::CloseSheet => {
                 // A No to signing out asked from Settings goes back there.
-                let back = matches!(self.sheet, Some(sheets::Sheet::SignOut { from_settings: true } | sheets::Sheet::RemoveDownloads));
+                let back = matches!(
+                    self.sheet,
+                    Some(
+                        sheets::Sheet::SignOut { from_settings: true }
+                            | sheets::Sheet::RemoveDownloads
+                            | sheets::Sheet::SignOutOf(_)
+                            | sheets::Sheet::RemoveSource(_)
+                    )
+                );
                 self.sheet = back.then_some(sheets::Sheet::Settings);
             }
             Action::OpenPalette => {
@@ -707,7 +771,7 @@ impl RedeApp {
         let Some(account) = self.session.account.clone() else { return };
         let Some(shelf) = self.session.shelf.clone() else { return };
         self.books.details.insert(id.clone(), Details::Loading);
-        self.bridge.open_book(self.session.source.clone(), shelf, sources::ItemKey::new(account.id, id));
+        self.bridge.open_book(self.session.source.clone(), shelf, accounts::ItemKey::new(account.id, id));
     }
 
     /// Asks for the listening the Stats place counts, unless it was asked for
@@ -876,7 +940,7 @@ impl eframe::App for RedeApp {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        if self.login.is_some() {
+        if self.signing_in() {
             self.login_ui(ui);
         } else {
             self.main_ui(ui);

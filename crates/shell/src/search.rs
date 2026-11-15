@@ -144,11 +144,20 @@ pub struct Scored {
 /// Every candidate in `hay` that matches `query`, best first: by rank, then
 /// fuzzy score, then `tiebreak` (higher wins), then haystack order.
 pub fn scored(query: &Query, hay: &[Hay], matcher: &mut Matcher, tiebreak: impl Fn(usize) -> i64) -> Vec<Scored> {
+    scored_where(query, hay, matcher, |_| true, tiebreak)
+}
+
+/// Like [`scored`], considering only candidates for which `include` returns `true`.
+pub fn scored_where(query: &Query, hay: &[Hay], matcher: &mut Matcher, include: impl Fn(usize) -> bool, tiebreak: impl Fn(usize) -> i64) -> Vec<Scored> {
     let words: Vec<&str> = query.plain.split(' ').collect();
     // Cheap literal pass first; the fuzzy matcher only sees what survives.
-    let literal: Vec<(Rank, usize)> = hay.iter().enumerate().map(|(i, h)| (rank(&query.plain, &words, &h.plain), i)).filter(|(r, _)| r.literal()).collect();
-    let pool: Vec<(Rank, usize)> =
-        if literal.is_empty() { (0..hay.len()).map(|i| (Rank { tier: 0, exact: false, leading: false }, i)).collect() } else { literal };
+    let literal: Vec<(Rank, usize)> =
+        hay.iter().enumerate().filter(|(i, _)| include(*i)).map(|(i, h)| (rank(&query.plain, &words, &h.plain), i)).filter(|(r, _)| r.literal()).collect();
+    let pool: Vec<(Rank, usize)> = if literal.is_empty() {
+        (0..hay.len()).filter(|i| include(*i)).map(|i| (Rank { tier: 0, exact: false, leading: false }, i)).collect()
+    } else {
+        literal
+    };
     let mut out: Vec<Scored> = pool
         .into_iter()
         .filter_map(|(rank, i)| {
@@ -206,5 +215,19 @@ mod tests {
         let hay: Vec<Hay> = names.iter().map(|n| Hay::new(n)).collect();
         let got = scored(&Query::new("guin").unwrap(), &hay, &mut Matcher::default(), |i| i as i64);
         assert_eq!(got.iter().map(|s| s.index).collect::<Vec<_>>(), [1, 0]);
+    }
+
+    #[test]
+    fn excluded_literal_matches_still_allow_fuzzy_fallback() {
+        let names = ["Fingerlings", "Noble Beast"];
+        let hay: Vec<Hay> = names.iter().map(|n| Hay::new(n)).collect();
+        let q = Query::new("nble").unwrap();
+        let got: Vec<usize> = scored_where(&q, &hay, &mut Matcher::default(), |i| i == 1, |_| 0).into_iter().map(|s| s.index).collect();
+        assert_eq!(got, [1]);
+        // Even if index 0 matched literally, excluding it keeps fuzzy index 1 searchable.
+        let names = ["nble literal", "Noble Beast"];
+        let hay: Vec<Hay> = names.iter().map(|n| Hay::new(n)).collect();
+        let got: Vec<usize> = scored_where(&q, &hay, &mut Matcher::default(), |i| i == 1, |_| 0).into_iter().map(|s| s.index).collect();
+        assert_eq!(got, [1]);
     }
 }

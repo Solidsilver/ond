@@ -11,10 +11,17 @@
 //! Playback holds the preferences that used to be a sheet: the skips, the
 //! rewinds, the sleep timer's length, and the two speech switches. The speed
 //! isn't here: the one saved is the one playing, and the Playback popover
-//! sets it. Account says who's signed in where, and has Sync now and Sign
-//! out… (the account menu keeps them too, a click from the sidebar). About is
-//! Ond's About without the updates, which Rede doesn't look for yet.
+//! sets it. Sources lists every account with the kit's source rows, each
+//! with its menu (rename, colour, Sync now for the one in view, Sign out…,
+//! Remove…; see `manage`), and Add source…, which opens the first-run
+//! sheet as the switcher's does; the switcher's Manage sources… opens it.
+//! Under them, the account in view has its own group: its full address,
+//! who's signed in and how, and the last sync with Sync now (the account
+//! menu keeps Sync now and Sign out… too, a click from the sidebar). Its
+//! state is on its row. About is Ond's About without the updates, which
+//! Rede doesn't look for yet.
 
+use super::manage::SourceAction;
 use super::view_ctx::ViewCtx;
 use super::{Action, PrefsAction};
 use egui::{FontId, Ui};
@@ -28,19 +35,19 @@ pub enum Tab {
     Playback,
     Downloads,
     Appearance,
-    Account,
+    Sources,
     About,
 }
 
 impl Tab {
-    pub const ALL: [Tab; 5] = [Tab::Playback, Tab::Downloads, Tab::Appearance, Tab::Account, Tab::About];
+    pub const ALL: [Tab; 5] = [Tab::Playback, Tab::Downloads, Tab::Appearance, Tab::Sources, Tab::About];
 
     pub fn label(self) -> &'static str {
         match self {
             Tab::Playback => "Playback",
             Tab::Downloads => "Downloads",
             Tab::Appearance => "Appearance",
-            Tab::Account => "Account",
+            Tab::Sources => "Sources",
             Tab::About => "About",
         }
     }
@@ -65,7 +72,7 @@ impl ViewCtx<'_> {
             Tab::Playback => self.playback_settings(ui),
             Tab::Downloads => self.download_settings(ui),
             Tab::Appearance => self.appearance_settings(ui),
-            Tab::Account => self.account_settings(ui),
+            Tab::Sources => self.source_settings(ui),
             Tab::About => about(ui),
         }
     }
@@ -158,25 +165,59 @@ impl ViewCtx<'_> {
         });
     }
 
-    /// The server and its state, the last sync, and who's signed in.
+    /// Every account, each with its menu, then Add source…, then the
+    /// account in view.
+    fn source_settings(&mut self, ui: &mut Ui) {
+        let can_sync = self.session.source.is_some() && !self.sync.running;
+        kit::group(ui, "Sources", |ui| {
+            let entries = self.source_entries();
+            if entries.is_empty() {
+                kit::setting(ui, "Not signed in", "", |_| ());
+            }
+            for entry in &entries {
+                let menu = kit::SourceRowMenu {
+                    rename: true,
+                    color: true,
+                    sync: (entry.live && can_sync).then_some("Sync now"),
+                    sign_out: !entry.signed_out,
+                    remove: true,
+                };
+                let id = entry.id;
+                let action = match kit::source_row(ui, &kit::SourceRow { source: entry.info(), menu, locked: None }) {
+                    Some(kit::SourceRowEvent::Rename(name)) => SourceAction::Rename(id, name).into(),
+                    Some(kit::SourceRowEvent::Color(color)) => SourceAction::Color(id, color).into(),
+                    Some(kit::SourceRowEvent::Sync) => Action::SyncNow,
+                    Some(kit::SourceRowEvent::SignOut) if entry.live => Action::AskSignOut,
+                    Some(kit::SourceRowEvent::SignOut) => SourceAction::AskSignOut(id).into(),
+                    Some(kit::SourceRowEvent::Remove) => SourceAction::AskRemove(id).into(),
+                    None => continue,
+                };
+                self.actions.push(action);
+            }
+        });
+        // Another account is added beside the one in view, so only once
+        // it's in.
+        let hint = "Sign in to another Audiobookshelf account. Rede shows one at a time; the switcher at the foot of the sidebar moves between them.";
+        kit::setting(ui, "Add a source", hint, |ui| {
+            if ui.add_enabled_ui(self.session.signed_in(), |ui| kit::secondary(ui, "Add source…")).inner.clicked() {
+                self.actions.push(Action::AddSource);
+            }
+        });
+        ui.add_space(20.0);
+        self.account_settings(ui);
+    }
+
+    /// The account in view, under its name: its full address, who's signed
+    /// in and how, and the last sync with Sync now. Its state is on its
+    /// row, and Sign out… in the row's menu.
     fn account_settings(&mut self, ui: &mut Ui) {
         let t = Tokens::of(ui);
-        let Some(account) = self.session.account.clone() else {
-            kit::group(ui, "Server", |ui| kit::setting(ui, "Not signed in", "", |_| ()));
-            return;
-        };
+        let Some(account) = self.session.account.clone() else { return };
         let state = self.account_state();
-        kit::group(ui, "Server", |ui| {
+        kit::group(ui, account.display_name(), |ui| {
             kit::setting(ui, "Address", "", |ui| value(ui, &account.server, t.muted));
-            let (status, color) = match &state {
-                super::sidebar::AccountState::Connected => ("Connected", t.ok),
-                super::sidebar::AccountState::Syncing(_) => ("Connected", t.ok),
-                super::sidebar::AccountState::Connecting => ("Connecting…", t.muted),
-                super::sidebar::AccountState::Offline => ("Can't reach the server", t.warn),
-            };
-            kit::setting(ui, "Status", "", |ui| value(ui, status, color));
-        });
-        kit::group(ui, "Library", |ui| {
+            let how = account.sign_in.map(|m| format!("With {}.", m.phrase())).unwrap_or_default();
+            kit::setting(ui, "Signed in as", &how, |ui| value(ui, &account.username, t.muted));
             let label = match (&state, self.sync.synced) {
                 (super::sidebar::AccountState::Syncing(line), _) => line.clone(),
                 (_, Some(at)) => format!("Synced {}", crate::fmt::ago(at)),
@@ -187,15 +228,6 @@ impl ViewCtx<'_> {
             kit::setting(ui, &label, hint, |ui| {
                 if ui.add_enabled_ui(can_sync, |ui| kit::secondary(ui, "Sync now")).inner.clicked() {
                     self.actions.push(Action::SyncNow);
-                }
-            });
-        });
-        kit::group(ui, "Signed in", |ui| {
-            let how = account.sign_in.map(|m| format!("Signed in with {}. ", m.phrase())).unwrap_or_default();
-            let hint = format!("{how}Signing out forgets the saved sign-in. Your books and your place in each stay on this computer.");
-            kit::setting(ui, &account.username, &hint, |ui| {
-                if kit::secondary_danger(ui, "Sign out…").clicked() {
-                    self.actions.push(Action::AskSignOut);
                 }
             });
         });

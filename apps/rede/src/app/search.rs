@@ -242,7 +242,8 @@ fn in_progress(books: &[ItemSummary], positions: &Positions) -> Vec<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sources::{ItemKey, Position, Progress, Series};
+    use accounts::ItemKey;
+    use sources::{Position, Progress, Series};
     use std::time::{Duration, SystemTime};
 
     fn book(id: &str, title: &str, author: &str, narrator: &str, series: Option<&str>) -> ItemSummary {
@@ -282,7 +283,7 @@ mod tests {
 
     fn progress(id: &str, secs: f64, finished: bool, ago: u64) -> (String, Progress) {
         let at = Some(SystemTime::now() - Duration::from_secs(ago));
-        (id.into(), Progress { item: ItemKey::new(sources::AccountId::from_uuid(uuid::Uuid::nil()), id), position: Position::from_secs(secs), finished, at })
+        (id.into(), Progress { item: ItemKey::new(accounts::AccountId::from_uuid(uuid::Uuid::nil()), id), position: Position::from_secs(secs), finished, at })
     }
 
     #[test]

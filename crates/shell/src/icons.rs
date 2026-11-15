@@ -99,6 +99,10 @@ pub enum Icon {
     /// A flame, pointed at the top and round at its foot, a smaller one
     /// inside: a streak kept going.
     Flame,
+    /// Two stacked units, each with a light: a server.
+    Server,
+    /// A folder with a tab on its top left.
+    Folder,
 }
 
 /// A five-point star's outline, top point first, in icon units (−1..1):
@@ -397,6 +401,19 @@ pub fn paint(painter: &Painter, rect: Rect, icon: Icon, color: Color32) {
             let lit = (0..=32).map(|k| on(c, r1, toward + alpha + (tau - 2.0 * alpha) * k as f32 / 32.0));
             let shadow = (1..32).map(|k| on(bite, r2, toward - beta - (tau - 2.0 * beta) * k as f32 / 32.0));
             painter.add(Shape::closed_line(lit.chain(shadow).collect(), Stroke::new((r * 0.16).max(1.1), color)));
+        }
+        Icon::Server => {
+            for (top, bottom) in [(-0.82, -0.08), (0.08, 0.82)] {
+                painter.rect_stroke(Rect::from_min_max(p(-0.85, top), p(0.85, bottom)), r * 0.12, line, egui::StrokeKind::Middle);
+                let y = (top + bottom) / 2.0;
+                painter.circle_filled(p(-0.5, y), r * 0.11, color);
+                painter.line_segment([p(0.05, y), p(0.55, y)], line);
+            }
+        }
+        Icon::Folder => {
+            let outline = vec![p(-0.88, -0.68), p(-0.3, -0.68), p(-0.12, -0.46), p(0.88, -0.46), p(0.88, 0.72), p(-0.88, 0.72)];
+            painter.add(Shape::closed_line(outline, line));
+            painter.line_segment([p(-0.88, -0.22), p(0.88, -0.22)], line);
         }
         Icon::Bookmark => {
             let ribbon = vec![p(-0.55, -0.85), p(0.55, -0.85), p(0.55, 0.88), p(0.0, 0.45), p(-0.55, 0.88)];

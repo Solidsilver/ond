@@ -8,6 +8,7 @@ pub enum Route {
     Artists,
     /// Every track, as a sortable table.
     Songs,
+    Playlists,
     /// An album artist's page; `id` when the server gave one.
     Artist {
         name: String,
@@ -28,6 +29,32 @@ pub enum Route {
     Offline,
 }
 
+/// Keeps a detail page when its entity survives in the new projection.
+/// A merged artist may be reached through any of its original members.
+pub fn route_in_scope(route: &Route, scope: &accounts::Scope, data: &crate::app::Data) -> Route {
+    let included = |id: &str| crate::source::identity::account(id).is_none_or(|a| scope.includes(a));
+    match route {
+        Route::Album(id) if !included(id) || data.album(id).is_none() => Route::Albums,
+        Route::Playlist { id, .. } if !included(id) || !data.playlists.iter().any(|p| p.id == *id) => Route::Playlists,
+        Route::Artist { name, id } => {
+            if let Some(group) = data.merged_artist(id.as_deref(), name)
+                && let Some(member) = group.members.iter().find(|m| scope.includes(m.key.account))
+            {
+                return Route::Artist { name: member.name.clone(), id: (!member.key.item.starts_with('\0')).then(|| member.key.to_string()) };
+            }
+            let matched = data.artists.iter().find(|a| crate::source::artists::normalize_name(&a.name) == crate::source::artists::normalize_name(name));
+            if let Some(artist) = matched {
+                Route::Artist { name: artist.name.clone(), id: Some(artist.id.clone()) }
+            } else if data.albums.iter().any(|a| a.has_artist(id.as_deref(), name)) {
+                route.clone()
+            } else {
+                Route::Artists
+            }
+        }
+        _ => route.clone(),
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum FilterKind {
     Genre,
@@ -38,7 +65,10 @@ pub enum FilterKind {
 impl Route {
     /// Top-level places the sidebar links to; going to one starts a fresh trail.
     pub fn is_root(&self) -> bool {
-        matches!(self, Route::Recent | Route::Albums | Route::Artists | Route::Songs | Route::Favorites | Route::Offline | Route::Playlist { .. })
+        matches!(
+            self,
+            Route::Recent | Route::Albums | Route::Artists | Route::Songs | Route::Playlists | Route::Favorites | Route::Offline | Route::Playlist { .. }
+        )
     }
 
     /// A track's artist page: its first credited artist (name and id) when the

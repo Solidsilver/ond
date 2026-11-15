@@ -155,7 +155,8 @@ impl ViewCtx<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sources::{ItemKey, Position};
+    use accounts::ItemKey;
+    use sources::Position;
     use std::time::{Duration, SystemTime};
 
     fn book(id: &str, title: &str) -> ItemSummary {
@@ -164,7 +165,7 @@ mod tests {
 
     fn at(id: &str, secs: f64, finished: bool, ago: Option<u64>) -> Progress {
         Progress {
-            item: ItemKey::new(sources::AccountId::from_uuid(uuid::Uuid::nil()), id),
+            item: ItemKey::new(accounts::AccountId::from_uuid(uuid::Uuid::nil()), id),
             position: Position::from_secs(secs),
             finished,
             at: ago.map(|s| SystemTime::now() - Duration::from_secs(s)),

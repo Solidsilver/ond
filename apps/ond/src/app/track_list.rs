@@ -29,6 +29,10 @@ const ROW_H: f32 = 38.0;
 const ROW_H_ARTIST: f32 = 44.0;
 /// Room above a disc heading after the first.
 const DISC_GAP: f32 = 12.0;
+/// The Source column, before the heart, while the list holds songs from
+/// more than one source; and the room the title keeps before it gives way.
+const SOURCE_W: f32 = 120.0;
+const SOURCE_MIN_TEXT: f32 = 240.0;
 
 impl ListOpts {
     pub fn row_h(&self) -> f32 {
@@ -42,13 +46,16 @@ struct List<'l> {
     tracks: &'l [Track],
     source: &'l Source,
     opts: &'l ListOpts,
-    /// The playing track's id.
-    current: Option<&'l str>,
+    /// The playing track's identity.
+    current: Option<&'l crate::source::TrackKey>,
+    /// The songs come from more than one source, so rows have a Source
+    /// column where there's room.
+    sources: bool,
 }
 
 impl<'l> List<'l> {
-    fn new(ui: &Ui, player: &'l crate::player::Player, tracks: &'l [Track], source: &'l Source, opts: &'l ListOpts) -> Self {
-        Self { t: Tokens::of(ui), tracks, source, opts, current: player.queue.current.as_ref().map(|c| c.track.id.as_str()) }
+    fn new(ui: &Ui, player: &'l crate::player::Player, tracks: &'l [Track], source: &'l Source, opts: &'l ListOpts, sources: bool) -> Self {
+        Self { t: Tokens::of(ui), tracks, source, opts, current: player.queue.current.as_ref().map(|c| &c.key), sources }
     }
 
     /// The line where a reorder drag would land, at `drop_at`'s y.
@@ -67,9 +74,9 @@ impl ViewCtx<'_> {
             if ui.button("New playlist…").clicked() {
                 self.actions.push(Action::Overlay(Overlay::new_playlist(tracks.to_vec())));
             }
-            let mine: Vec<subsonic::Playlist> = self.data.playlists.iter().filter(|p| self.owns(p)).cloned().collect();
-            let recent: Vec<&subsonic::Playlist> = self.ui.recent_playlists.iter().filter_map(|id| mine.iter().find(|p| &p.id == id)).collect();
-            let mut rest: Vec<&subsonic::Playlist> = mine.iter().filter(|p| !self.ui.recent_playlists.contains(&p.id)).collect();
+            let mine: Vec<crate::source::Playlist> = self.data.playlists.iter().filter(|p| self.owns(p)).cloned().collect();
+            let recent: Vec<&crate::source::Playlist> = self.ui.recent_playlists.iter().filter_map(|id| mine.iter().find(|p| &p.id == id)).collect();
+            let mut rest: Vec<&crate::source::Playlist> = mine.iter().filter(|p| !self.ui.recent_playlists.contains(&p.id)).collect();
             rest.sort_by_cached_key(|p| p.name.to_lowercase());
             for group in [recent, rest] {
                 if group.is_empty() {
@@ -101,7 +108,7 @@ impl ViewCtx<'_> {
 
     fn track_list_in(&mut self, ui: &mut Ui, tracks: &[Track], source: &Source, opts: ListOpts) {
         let moved = self.track_list_keys(ui, tracks, source, opts.playlist.as_deref());
-        let list = List::new(ui, self.player, tracks, source, &opts);
+        let list = List::new(ui, self.player, tracks, source, &opts, self.sources_column(tracks));
         let discs = if opts.numbers { tracks.iter().filter_map(|t| t.disc).max().unwrap_or(1) } else { 1 };
         let mut last_disc = None;
         let mut drop_at = None;
@@ -142,7 +149,7 @@ impl ViewCtx<'_> {
             self.take_reveal(&tracks[i], i);
         }
         let bring = revealed.map(|i| (i, Some(egui::Align::Center))).or_else(|| self.ui.track_sel.filter(|_| moved).map(|i| (i, None)));
-        let list = List::new(ui, self.player, tracks, source, &opts);
+        let list = List::new(ui, self.player, tracks, source, &opts, self.sources_column(tracks));
         let h = opts.row_h();
         // Rows sit flush: the scroll area places them by the same height.
         ui.spacing_mut().item_spacing.y = 0.0;
@@ -178,7 +185,7 @@ impl ViewCtx<'_> {
     /// would land: (index to insert at, y of the line).
     fn track_row(&mut self, ui: &mut Ui, list: &List, i: usize, row: &TrackRow) -> Option<(usize, f32)> {
         let tr = &list.tracks[i];
-        let playing = list.current == Some(tr.id.as_str());
+        let playing = list.current.is_some_and(|key| crate::source::matches_track(key, self.session.account(), &tr.id));
         let selected = self.ui.focus == Focus::Main && self.ui.track_sel == Some(i);
         let loved = self.favorites.is_on(StarKind::Song, &tr.id);
         let drop_at = self.track_row_drag(ui, list, i, row);
@@ -243,7 +250,7 @@ impl ViewCtx<'_> {
         // Offline, what isn't downloaded is dimmed rather than hidden.
         let available = self.playable(tr);
         let color = crate::widgets::track_color(t, playing, available);
-        row.mark(ui, rect.right() - col::MARK_FROM_RIGHT, self.downloads.snap.track(&tr.id));
+        row.mark(ui, rect.right() - col::MARK_FROM_RIGHT, self.download_state(tr));
         if opts.numbers {
             if playing {
                 let side = col::NUMBER_PLAYING;
@@ -264,7 +271,7 @@ impl ViewCtx<'_> {
         // The heart sits just left of the duration: always when loved,
         // on hover otherwise.
         let heart = Rect::from_center_size(pos2(rect.right() - col::HEART_FROM_RIGHT, cy), vec2(col::HEART_BOX, col::HEART_BOX));
-        if loved || hovered {
+        if (loved || hovered) && self.session.caps().stars {
             let label = if loved { "Unlove" } else { "Love" };
             let hr = crate::widgets::hover_heart(ui, heart, ui.scope_id().with(("heart", &tr.id, i)), loved, true, 12.0, label);
             if hr.on_hover_text(label).clicked() {
@@ -272,7 +279,16 @@ impl ViewCtx<'_> {
             }
         }
         let actions_w = if hovered { col::ACTIONS_W } else { 0.0 };
-        let text_w = rect.right() - col::TEXT_FROM_RIGHT - actions_w - x;
+        // The Source column sits just before the heart, and gives way first
+        // to a narrow window; the hover actions take its place.
+        let text_end = rect.right() - col::TEXT_FROM_RIGHT;
+        let source = if list.sources && text_end - SOURCE_W - x >= SOURCE_MIN_TEXT { self.track_sources(&tr.id) } else { Vec::new() };
+        let source_w = if source.is_empty() { 0.0 } else { SOURCE_W };
+        let text_w = text_end - actions_w.max(source_w) - x;
+        if !hovered {
+            let at = (text_end - SOURCE_W + col::INSET, cy, SOURCE_W - 2.0 * col::INSET);
+            super::source_look::source_cell(ui, at, &source, TrackRow::ground(t, selected, false), FontId::proportional(12.0), t.muted);
+        }
         let title_font = title_font(13.0, playing);
         if opts.artist {
             row.two_lines(ui, x, text_w, (&tr.title, title_font, color), (tr.artist.as_deref().unwrap_or(""), FontId::proportional(12.0), t.muted));
@@ -350,12 +366,15 @@ impl ViewCtx<'_> {
         if ui.button("Add to queue").clicked() {
             self.actions.push(Action::Tracks { tracks: vec![tr.clone()], source: source.clone(), action: QueueAction::Add });
         }
-        ui.separator();
+        let caps = self.session.caps();
+        if caps.stars || caps.ratings || caps.playlists {
+            ui.separator();
+        }
         let loved = self.favorites.is_on(StarKind::Song, &tr.id);
-        if ui.button(if loved { "Unlove" } else { "Love" }).clicked() {
+        if caps.stars && ui.button(if loved { "Unlove" } else { "Love" }).clicked() {
             self.actions.push(Action::ToggleStar { kind: StarKind::Song, id: tr.id.clone(), track: Some(Box::new(tr.clone())), name: None });
         }
-        ui.menu_button("Rating", |ui| {
+        let rating = |ui: &mut Ui| {
             let current = self.favorites.rating(&tr.id);
             for r in 1..=5u8 {
                 if crate::widgets::rating_choice(ui, r, current == r).clicked() {
@@ -367,8 +386,13 @@ impl ViewCtx<'_> {
             if ui.add_enabled(current > 0, egui::Button::new("Clear rating")).clicked() {
                 self.actions.push(Action::Rate(tr.id.clone(), 0));
             }
-        });
-        self.add_to_playlist_menu(ui, std::slice::from_ref(tr));
+        };
+        if caps.ratings {
+            ui.menu_button("Rating", rating);
+        }
+        if caps.playlists {
+            self.add_to_playlist_menu(ui, std::slice::from_ref(tr));
+        }
         if let Some(artist) = &tr.artist {
             ui.separator();
             if ui.button(format!("Go to {artist}")).clicked()
@@ -382,8 +406,8 @@ impl ViewCtx<'_> {
         }
         // Kept on its own: can be removed on its own. Kept with an album or
         // playlist: that's where it's removed.
-        let alone = self.downloads.snap.pin(&offline::Pin::Track(tr.id.clone())).is_some();
-        if alone || !self.downloads.snap.is_done(&tr.id) {
+        let alone = self.track_pin(tr).is_some_and(|p| self.downloads.snap.pin(&p).is_some());
+        if caps.downloads && (alone || !matches!(self.download_state(tr), Some(offline::TrackState::Done { .. }))) {
             ui.separator();
             super::browse::offline_item(ui, alone, None, || Keep::Tracks(vec![tr.clone()]), self.actions);
         }

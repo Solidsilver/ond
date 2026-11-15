@@ -82,7 +82,7 @@ impl ViewCtx<'_> {
     /// Asks the server for `track`'s lyrics the first time a lyrics view
     /// needs them.
     pub(super) fn ensure_lyrics(&mut self, track: &Track) {
-        if !self.lyrics.contains_key(&track.id) && self.session.client.is_some() {
+        if !self.lyrics.contains_key(&track.id) && self.session.source.is_some() {
             self.actions.push(Action::NeedLyrics(Box::new(track.clone())));
         }
     }
@@ -106,7 +106,7 @@ impl ViewCtx<'_> {
         match fetched.get(&track.id) {
             Some(Fetch::Done(Some(l))) => self.lyrics_block(ui, track, l, size, t.panel),
             Some(Fetch::Loading) => note(ui, "Looking for lyrics…"),
-            _ if self.session.client.is_none() => note(ui, "Lyrics load when the server is connected."),
+            _ if self.session.source.is_none() => note(ui, "Lyrics load when the server is connected."),
             _ => note(ui, "No lyrics for this song."),
         }
     }
@@ -188,7 +188,7 @@ impl ViewCtx<'_> {
             let title = elide(ui, &track.title, FontId::new(20.0, semibold()), t.text, width - 36.0);
             let (r, _) = ui.allocate_exact_size(vec2(width - 32.0, title.size().y), Sense::hover());
             ui.painter().galley(r.min, title, t.text);
-            if heart_button(ui, loved, 26.0, 13.0).clicked() {
+            if self.session.caps().stars && heart_button(ui, loved, 26.0, 13.0).clicked() {
                 self.actions.push(Action::ToggleStar { kind: StarKind::Song, id: track.id.clone(), track: Some(Box::new(track.clone())), name: None });
             }
         });
@@ -203,13 +203,22 @@ impl ViewCtx<'_> {
             let sep_w = if track.artist.is_some() && album.is_some() { natural(ui, sep) } else { 0.0 };
             let artist_w = track.artist.as_deref().map_or(0.0, |a| natural(ui, a));
             let album_w = album.map_or(0.0, |al| natural(ui, &al.name));
-            let room = width - sep_w;
+            // Where it comes from follows the artist, whenever there's more
+            // than one source.
+            let dot = self.playing_dot(track);
+            let dot_w = if dot.is_some() { shell::kit::DOT_TRAIL } else { 0.0 };
+            let room = width - sep_w - dot_w;
             let artist_max = if artist_w + album_w <= room { artist_w } else { artist_w.min((room - album_w).max(room * 0.5)) };
             if let Some(artist) = &track.artist
                 && link_line(ui, artist, font.clone(), t.accent, artist_max).clicked()
                 && let Some(route) = Route::artist_of(track)
             {
                 self.actions.push(Action::Go(route));
+            }
+            if let Some(color) = dot {
+                let h = ui.painter().layout_no_wrap("A".into(), font.clone(), t.text).size().y;
+                let (r, _) = ui.allocate_exact_size(vec2(dot_w, h), Sense::hover());
+                shell::kit::source_dot_after(ui, r.left(), r.center().y, color);
             }
             if let Some(al) = album {
                 if track.artist.is_some() {

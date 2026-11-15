@@ -3,7 +3,7 @@ use super::*;
 use sources::{Chapter, Item, ItemSummary, Library, LibraryKind, Position, ProgressUpdate, Series, Stamp, TrackFile};
 use std::time::Duration;
 
-fn account() -> sources::AccountId {
+fn account() -> accounts::AccountId {
     "2f1a5c3e-8a4b-4f6d-9e0a-1c2b3d4e5f60".parse().unwrap()
 }
 

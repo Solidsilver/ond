@@ -36,6 +36,18 @@ pub const DIALOG_W: f32 = 340.0;
 /// the red `verb`, which ⏎ answers too. `Some(true)` for `verb`,
 /// `Some(false)` for Cancel.
 pub fn confirm(ui: &mut Ui, title: &str, body: &str, verb: &str) -> Option<bool> {
+    question(ui, title, body, verb, true)
+}
+
+/// An offer in a sheet: as [`confirm`], but `verb` is the filled
+/// [`primary`](super::primary), for a question whose yes loses nothing
+/// (making a copy, carrying on).
+pub fn ask(ui: &mut Ui, title: &str, body: &str, verb: &str) -> Option<bool> {
+    question(ui, title, body, verb, false)
+}
+
+/// [`confirm`] and [`ask`]: the verb in red when it can't be undone.
+fn question(ui: &mut Ui, title: &str, body: &str, verb: &str, danger: bool) -> Option<bool> {
     let t = Tokens::of(ui);
     ui.set_width(DIALOG_W);
     ui.label(egui::RichText::new(title).font(FontId::new(15.0, semibold())).color(t.text));
@@ -46,7 +58,8 @@ pub fn confirm(ui: &mut Ui, title: &str, body: &str, verb: &str) -> Option<bool>
     let mut answer = None;
     ui.horizontal(|ui| {
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if super::danger(ui, verb).clicked() || enter {
+            let yes = if danger { super::danger(ui, verb) } else { super::primary(ui, None, verb) };
+            if yes.clicked() || enter {
                 answer = Some(true);
             }
             ui.add_space(4.0);
@@ -205,6 +218,23 @@ mod tests {
             let order: Vec<*const ShortcutGroup<'_>> = all.iter().map(|g| g as *const _).collect();
             assert_eq!(flat, order);
         }
+    }
+
+    #[test]
+    fn an_offer_answers_yes_for_its_verb_and_no_for_cancel() {
+        use egui_kittest::kittest::Queryable;
+        let mut h = crate::kit::themed(None, |ui, answer: &mut Option<bool>| {
+            if let Some(a) = ask(ui, "Make an Ond playlist instead?", "Ond can keep a copy.", "Make Ond playlist") {
+                *answer = Some(a);
+            }
+        });
+        h.run();
+        h.get_by_label("Make Ond playlist").click();
+        h.run();
+        assert_eq!(h.state().1, Some(true));
+        h.get_by_label("Cancel").click();
+        h.run();
+        assert_eq!(h.state().1, Some(false));
     }
 
     #[test]

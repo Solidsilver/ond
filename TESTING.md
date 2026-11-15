@@ -33,6 +33,41 @@ Frame times on a big library and the search index's keystroke latency:
 - [ ] Streaming → Always AAC 256 (check Navidrome has the AAC transcoder): `AAC 256 · transcoded`.
 - [ ] Settings › Queue: the Apple Music and Spotify presets set the four rows at once and the queue follows them (Play next goes to the top with Apple Music, after the next track with Ond); changing a row turns the preset to Custom; the choice survives a restart.
 
+## Music folders
+- [ ] With a folder live, copy an album onto a watched external drive: it appears a few seconds after the copy ends without Rescan. Delete it: it disappears. Unplug and reconnect the drive: Folder missing appears and then clears automatically, with the stored albums kept while absent.
+- [ ] Switch scope away from a folder source, then change its files: its watcher still updates it. Remove the source, then change its files: no scan or notification comes from the removed account.
+- [ ] On a network share that delivers no file events, add a track while Ond is closed: reopening still finds it. While open, Rescan finds changes even when the share sends no notifications.
+- [ ] First run: pick Music folder, Choose folder… opens the system's folder picker (macOS: NSOpenPanel; Linux: the portal; Windows: the common dialog); a big library shows the count climbing, then the library opens and plays with Wi-Fi off.
+- [ ] A folder on an external drive: unplug it mid-play. The playing track stops or plays out what's buffered; the next fails with "…isn't there" and is skipped; Rescan shows Folder missing in the footer and Settings › Sources, and the albums stay. Plug it back in and Rescan: the state clears and the tracks play.
+- [ ] Start Ond with that drive unplugged: it opens on the stored library with Folder missing, not a sign-in prompt.
+- [ ] A folder on a network share (SMB/NFS): scanning works, and a share that drops mid-scan reports the folder missing rather than emptying the library.
+- [ ] A folder with files Ond can't read (a corrupt FLAC, a DRM'd .m4p): Settings › Sources says how many were skipped.
+- [ ] Sign out of one server while a folder or another server is open: only that server needs sign-in, the other sources stay usable, and its cached library remains. Sign in again and confirm its existing mirror and downloads are reused.
+- [ ] Remove… on a folder source: the music files are all still there afterwards.
+
+## Ond: All sources
+
+Use a release build, two real servers (or a server and a folder) and an audio
+device. Automated tests cover identity, session cancellation, scope mapping,
+artist matching, playlist resolution and removal with fakes.
+
+- [ ] Both servers connect together. Disconnect one and keep playing from the
+  other; focus the window and confirm only the unreachable one reconnects.
+- [ ] Play a queue alternating server and folder tracks, including a gapless
+  boundary. Control Center/media keys show the right metadata and artwork;
+  server play counts and scrobbles go to each track's own server.
+- [ ] Work Offline disconnects every server while folder playback and folder
+  watches keep working. Returning online reconnects the signed-in servers.
+- [ ] Change scope and chips during playback and while syncs run. The queue
+  keeps playing, search covers the new scope, and album/artist pages retain
+  their place when that entity survives. Each source's sync stays independent.
+- [ ] Add a folder track to a server playlist, accept Make an Ond playlist,
+  and play/export the copy. The server playlist stays unchanged. Rename,
+  reorder and remove entries in the copy, then restart and check its order.
+- [ ] Download from each server, relaunch offline, and play both accounts'
+  downloaded tracks. Remove one source: only its queue entries, downloads,
+  mirror and art go; the other account and original music files remain.
+
 ## macOS integration
 - [ ] Control Center shows title/artwork/progress; scrubbing there seeks.
 - [ ] F7/F8/F9 and headphone buttons work, also with the window minimized.

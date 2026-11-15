@@ -28,12 +28,12 @@ use async_trait::async_trait;
 use bytes::Bytes;
 
 use crate::error::{Error, Result};
-use crate::id::{AccountId, ItemKey};
 use crate::model::{
     Capabilities, Changes, Chapter, DeviceInfo, Item, ItemSummary, Library, LibraryId, LibraryKind, PlaySession, Position, Progress, ProgressUpdate, Series,
     SessionTrack, Stamp, TrackFile,
 };
 use crate::source::Source;
+use accounts::{AccountId, ItemKey};
 
 /// Items per listing page. ABS returns everything at once for a `limit` of 0,
 /// which for a large library is a lot of JSON; 200 is a few requests for most

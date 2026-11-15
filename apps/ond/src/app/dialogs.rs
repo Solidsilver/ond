@@ -1,6 +1,7 @@
 //! Sheets over the window: naming a playlist, confirming a delete or a sign-out, asking
-//! whether to keep the tracks you added, the keyboard shortcut list (⌘/) and
-//! settings (⌘,). One at a time; Esc or a click outside closes it.
+//! whether to keep the tracks you added, offering an Ond copy of a server
+//! playlist that can't hold another source's songs, the keyboard shortcut
+//! list (⌘/) and settings (⌘,). One at a time; Esc or a click outside closes it.
 
 use super::commands::PlaylistAction;
 use super::{Action, OndApp};
@@ -9,9 +10,13 @@ use crate::theme::{Tokens, semibold};
 use crate::widgets::{primary, secondary};
 use egui::{FontId, Key, Modifiers, vec2};
 use library::Track;
-use shell::kit::{DIALOG_W, ShortcutGroup, confirm, shortcuts_sheet};
+use shell::kit::{DIALOG_W, ShortcutGroup, ask, confirm, shortcuts_sheet};
 
 pub enum Overlay {
+    SignOutSource {
+        account: accounts::AccountId,
+    },
+    MixedPlaylist,
     Shortcuts,
     Settings,
     /// Name a new playlist holding `tracks` (empty for File › New Playlist).
@@ -32,6 +37,11 @@ pub enum Overlay {
     SignOut {
         host: String,
         from_settings: bool,
+    },
+    /// Remove the source `id` (called `name`)? Asked from Settings.
+    RemoveSource {
+        id: accounts::AccountId,
+        name: String,
     },
     /// Playing something new while the user has added tracks: keep them or
     /// clear them? (Settings › Queue › Playing something new: Ask.)
@@ -66,6 +76,7 @@ impl OndApp {
         }
         // Experimental keys are listed only while their experiment is on.
         let visualizer = self.ui.prefs.experimental.visualizer;
+        let mixed_body = if matches!(self.ui.overlay, Some(Overlay::MixedPlaylist)) { self.mixed_playlist_body() } else { String::new() };
         let Some(overlay) = self.ui.overlay.as_mut() else { return };
         let id = egui::Id::unique("overlay");
         let frame = shell::kit::sheet_frame(ctx);
@@ -73,6 +84,21 @@ impl OndApp {
         let modal = egui::Modal::new(id).frame(frame).show(ctx, |ui| {
             let t = Tokens::of(ui);
             match overlay {
+                Overlay::SignOutSource { account } => {
+                    if let Some(yes) = confirm(
+                        ui,
+                        "Sign out of this source?",
+                        "Ond forgets its saved password. Its library and queue entries stay on this computer.",
+                        "Sign out",
+                    ) {
+                        done = Some(yes.then(|| Action::ForSource(*account, Box::new(Action::SignOut))));
+                    }
+                }
+                Overlay::MixedPlaylist => {
+                    if let Some(yes) = ask(ui, "Make an Ond playlist instead?", &mixed_body, "Make Ond playlist") {
+                        done = Some(Some(Action::PlaylistEdit(PlaylistAction::AcceptMixed(yes))));
+                    }
+                }
                 Overlay::Shortcuts => shortcuts_ui(ui, visualizer),
                 // Drawn by `settings_window` above, which returns first.
                 Overlay::Settings => {}
@@ -127,8 +153,18 @@ impl OndApp {
                         done = Some(yes.then_some(Action::SignOut));
                     }
                 }
+                Overlay::RemoveSource { id, name } => {
+                    let body = "Ond forgets its library on this computer. Your music files are kept, untouched.";
+                    if let Some(yes) = confirm(ui, &format!("Remove “{name}”?"), body, "Remove") {
+                        done = Some(yes.then(|| super::SourceAction::Remove(*id).into()));
+                    }
+                }
                 Overlay::Delete { id, name } => {
-                    let body = "This deletes the playlist on the server. The songs stay in your library.";
+                    let body = if self.session.source_caps().playlists {
+                        "This deletes the playlist on the server. The songs stay in your library."
+                    } else {
+                        "This deletes the playlist. The songs stay in your library."
+                    };
                     if let Some(yes) = confirm(ui, &format!("Delete “{name}”?"), body, "Delete") {
                         done = Some(yes.then(|| Action::PlaylistEdit(PlaylistAction::Delete { id: id.clone() })));
                     }
@@ -138,9 +174,14 @@ impl OndApp {
         if modal.should_close() {
             done = Some(None);
         }
+        // Closed without an answer, the offer is declined, so it's not left waiting.
+        if matches!(done, Some(None)) && matches!(self.ui.overlay, Some(Overlay::MixedPlaylist)) {
+            done = Some(Some(Action::PlaylistEdit(PlaylistAction::AcceptMixed(false))));
+        }
         if let Some(action) = done {
             ctx.data_mut(|d| d.remove::<bool>(name_focused_id()));
-            let back_to_settings = action.is_none() && matches!(self.ui.overlay, Some(Overlay::SignOut { from_settings: true, .. }));
+            let back_to_settings =
+                action.is_none() && matches!(self.ui.overlay, Some(Overlay::SignOut { from_settings: true, .. } | Overlay::RemoveSource { .. }));
             self.ui.overlay = back_to_settings.then_some(Overlay::Settings);
             if let Some(a) = action {
                 self.actions.push(a);

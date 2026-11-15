@@ -11,6 +11,7 @@ name = "Rede"
 path = "src/main.rs"
 
 [dependencies]
+accounts = { version = "0.5.0", path = "../../crates/accounts" }
 offline = { version = "0.5.0", path = "../../crates/offline" }
 url = "2.5.8"
 abs = { version = "0.5.0", path = "../../crates/abs" }

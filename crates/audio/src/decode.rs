@@ -67,7 +67,7 @@ pub(crate) enum DecoderMsg {
     /// A seek for track `seq` arrived after the decoder had moved past it.
     SeekMiss { seq: u64, to: Duration },
     /// Track `seq` (`track_id`) failed; the session ends after what's already queued.
-    Error { seq: u64, track_id: String, message: String },
+    Error { seq: u64, track_id: String, kind: crate::ErrorKind, message: String },
 }
 
 /// At the end of the last queued track the decode thread waits for a next one
@@ -151,6 +151,7 @@ impl Session {
             seek_pending,
             at_seq,
             track_id: String::new(),
+            error_kind: crate::ErrorKind::Other,
             seek_rx,
             next,
             caps,
@@ -169,7 +170,7 @@ impl Session {
                     && !ctx.cancel.load(Ordering::Relaxed)
                 {
                     let track_id = ctx.track_id.clone();
-                    let _ = ctx.msgs.send(DecoderMsg::Error { seq, track_id, message });
+                    let _ = ctx.msgs.send(DecoderMsg::Error { seq, track_id, kind: ctx.error_kind, message });
                 }
                 done.store(true, Ordering::Release);
             })
@@ -253,6 +254,7 @@ pub(crate) struct Ctx {
     at_seq: Arc<AtomicU64>,
     /// Id of the track at `at_seq`, for error reports.
     track_id: String,
+    error_kind: crate::ErrorKind,
     seek_rx: Receiver<SeekReq>,
     next: NextSlot,
     /// The output device, as it was when the session started (picks the ring's rate).
@@ -426,6 +428,7 @@ impl Ctx {
         let mut out: Option<Out> = None;
         let result = loop {
             self.track_id.clone_from(&src.id);
+            self.error_kind = crate::ErrorKind::Other;
             let mut track = match self.open(&src) {
                 Ok(t) => t,
                 Err(_) if self.cancel.load(Ordering::Relaxed) => return Ok(()),
@@ -515,14 +518,24 @@ impl Ctx {
             let (cancel, seek, probed) = (self.cancel.clone(), self.seek_pending.clone(), probed.clone());
             Arc::new(move || cancel.load(Ordering::Relaxed) || (probed.load(Ordering::Relaxed) && seek.load(Ordering::Relaxed)))
         };
-        let mss = MediaSourceStream::new(open_source(src, self.cache.as_ref(), abort)?, Default::default());
+        let mss = MediaSourceStream::new(
+            open_source(src, self.cache.as_ref(), abort).map_err(|(kind, message)| {
+                self.error_kind = kind;
+                message
+            })?,
+            Default::default(),
+        );
 
         let mut hint = Hint::new();
         if let Some(ext) = &src.suffix {
             hint.with_extension(ext);
         }
-        let mut reader =
-            symphonia::default::get_probe().probe(&hint, mss, FormatOptions::default(), MetadataOptions::default()).map_err(|e| format!("probe: {e}"))?;
+        let mut reader = symphonia::default::get_probe().probe(&hint, mss, FormatOptions::default(), MetadataOptions::default()).map_err(|e| {
+            if stream_unavailable(src, &e) {
+                self.error_kind = crate::ErrorKind::Unavailable;
+            }
+            format!("probe: {e}")
+        })?;
         probed.store(true, Ordering::Relaxed);
         let tag_gain = tag_replay_gain(reader.as_mut());
         let track = reader.default_track(TrackType::Audio).ok_or("no audio track")?;
@@ -558,7 +571,7 @@ impl Ctx {
         let mut map: Option<ChannelMap> = None;
         loop {
             let started = map.is_some();
-            let spec = match self.next_audio(seq, t, out.as_mut().filter(|_| started), &mut packets)? {
+            let spec = match self.next_audio(seq, src, t, out.as_mut().filter(|_| started), &mut packets)? {
                 Next::Audio(spec) => spec,
                 Next::End => break,
                 Next::Cancelled => return Ok(TrackEnd::Cancelled),
@@ -604,7 +617,7 @@ impl Ctx {
     /// `packets.scratch`), handling seeks, the end of the track (waiting there
     /// for a next one, see [`linger`](Self::linger)) and cancels on the way.
     /// `out` is the ring once the track has started.
-    fn next_audio(&mut self, seq: u64, t: &mut Track, mut out: Option<&mut Out>, packets: &mut Packets) -> Result<Next, String> {
+    fn next_audio(&mut self, seq: u64, src: &TrackSource, t: &mut Track, mut out: Option<&mut Out>, packets: &mut Packets) -> Result<Next, String> {
         loop {
             if self.cancel.load(Ordering::Relaxed) {
                 return Ok(Next::Cancelled);
@@ -631,7 +644,12 @@ impl Ctx {
                     }
                     return Ok(Next::End);
                 }
-                Err(e) => return Err(format!("read: {e}")),
+                Err(e) => {
+                    if stream_unavailable(src, &e) {
+                        self.error_kind = crate::ErrorKind::Unavailable;
+                    }
+                    return Err(format!("read: {e}"));
+                }
             };
             if packet.track_id != t.track_id {
                 continue;
@@ -1108,7 +1126,12 @@ impl Ctx {
             Err(SymError::SeekError(SeekErrorKind::OutOfRange)) => Seeked::End,
             Err(e) => {
                 if !self.seek_pending.load(Ordering::Acquire) {
-                    let _ = self.msgs.send(DecoderMsg::Error { seq, track_id: self.track_id.clone(), message: format!("seek: {e}") });
+                    let _ = self.msgs.send(DecoderMsg::Error {
+                        seq,
+                        track_id: self.track_id.clone(),
+                        kind: crate::ErrorKind::Other,
+                        message: format!("seek: {e}"),
+                    });
                 }
                 Seeked::Nothing
             }
@@ -1164,7 +1187,12 @@ impl Ctx {
             match stretch::speech(o.src_rate, o.format.channels, self.speed) {
                 Ok(stretch) => o.stretch = stretch,
                 Err(e) => {
-                    let _ = self.msgs.send(DecoderMsg::Error { seq, track_id: self.track_id.clone(), message: format!("stretch: {e}") });
+                    let _ = self.msgs.send(DecoderMsg::Error {
+                        seq,
+                        track_id: self.track_id.clone(),
+                        kind: crate::ErrorKind::Other,
+                        message: format!("stretch: {e}"),
+                    });
                     return Seeked::Nothing;
                 }
             }
@@ -1271,8 +1299,13 @@ fn replay_gain_from_tags<'a>(tags: impl Iterator<Item = &'a Tag>) -> ReplayGain 
     rg
 }
 
+fn stream_unavailable(src: &TrackSource, error: &SymError) -> bool {
+    !src.url.starts_with("file://")
+        && matches!(error, SymError::IoError(io) if !matches!(io.kind(), std::io::ErrorKind::UnexpectedEof | std::io::ErrorKind::Interrupted))
+}
+
 /// `file://` for local files (offline downloads, tests); anything else goes through the stream cache.
-fn open_source(src: &TrackSource, cache: Option<&StreamCache>, abort: Abort) -> Result<Box<dyn MediaSource>, String> {
+fn open_source(src: &TrackSource, cache: Option<&StreamCache>, abort: Abort) -> Result<Box<dyn MediaSource>, (crate::ErrorKind, String)> {
     #[cfg(test)]
     if src.url == "test://panic" {
         panic!("a decoder blew up");
@@ -1280,7 +1313,7 @@ fn open_source(src: &TrackSource, cache: Option<&StreamCache>, abort: Abort) -> 
     // A source that can only be read forward.
     #[cfg(test)]
     if let Some(path) = src.url.strip_prefix("test-unseekable://") {
-        let f = std::fs::File::open(path).map_err(|e| format!("open {path}: {e}"))?;
+        let f = std::fs::File::open(path).map_err(|e| (crate::ErrorKind::Other, format!("open {path}: {e}")))?;
         return Ok(Box::new(tests::Unseekable(f)));
     }
     // A file behind a slow server: opening takes half a second.
@@ -1289,19 +1322,31 @@ fn open_source(src: &TrackSource, cache: Option<&StreamCache>, abort: Abort) -> 
         let until = Instant::now() + Duration::from_millis(500);
         while Instant::now() < until {
             if abort() {
-                return Err("aborted".into());
+                return Err((crate::ErrorKind::Other, "aborted".into()));
             }
             thread::sleep(Duration::from_millis(5));
         }
-        let f = std::fs::File::open(path).map_err(|e| format!("open {path}: {e}"))?;
+        let f = std::fs::File::open(path).map_err(|e| (crate::ErrorKind::Other, format!("open {path}: {e}")))?;
         return Ok(Box::new(f));
     }
     if let Some(path) = src.url.strip_prefix("file://") {
-        let f = std::fs::File::open(path).map_err(|e| format!("open {path}: {e}"))?;
+        // Said plainly: the usual reason is a drive that isn't plugged in.
+        let f = std::fs::File::open(path).map_err(|e| {
+            (
+                if e.kind() == std::io::ErrorKind::NotFound { crate::ErrorKind::Unavailable } else { crate::ErrorKind::Other },
+                match e.kind() {
+                    std::io::ErrorKind::NotFound => format!("{path} isn't there"),
+                    std::io::ErrorKind::PermissionDenied => format!("Ond isn't allowed to read {path}"),
+                    _ => format!("couldn't open {path}: {e}"),
+                },
+            )
+        })?;
         return Ok(Box::new(f));
     }
-    let cache = cache.ok_or("no stream cache configured")?;
-    let source = cache.open(&src.cache_key(), &src.url, abort).map_err(|e| format!("fetch: {e}"))?;
+    let cache = cache.ok_or((crate::ErrorKind::Other, "no stream cache configured".into()))?;
+    let source = cache.open(&src.cache_key(), &src.url, abort).map_err(|e| {
+        (if e.kind() == std::io::ErrorKind::Interrupted { crate::ErrorKind::Other } else { crate::ErrorKind::Unavailable }, format!("fetch: {e}"))
+    })?;
     Ok(Box::new(Cached(source)))
 }
 

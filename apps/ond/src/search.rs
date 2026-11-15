@@ -6,7 +6,7 @@
 //! each capped, and a top hit that's the best literal match of the three.
 
 use library::{Album, Artist, Track};
-use shell::search::{Hay, Matcher, Query, Scored, scored};
+use shell::search::{Hay, Matcher, Query, Scored, scored_where};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
@@ -163,7 +163,7 @@ impl SearchIndex {
             artists
                 .iter()
                 .map(|a| ArtistEntry {
-                    id: Some(a.id.clone()),
+                    id: (!a.id.is_empty()).then(|| a.id.clone()),
                     name: a.name.clone(),
                     sort: a.sort.clone().unwrap_or_else(|| a.name.clone()),
                     albums: a.album_count as usize,
@@ -204,11 +204,23 @@ impl SearchIndex {
     }
 
     pub fn search(&mut self, query: &str) -> Results {
+        self.search_where(query, |_| true, |_| true, |_| true)
+    }
+
+    /// Scores only entries matching the predicates so out-of-scope items never
+    /// fill group caps or steal the top hit while a rebuild is in flight.
+    pub fn search_where(
+        &mut self,
+        query: &str,
+        allow_artist: impl Fn(&ArtistEntry) -> bool,
+        allow_album: impl Fn(&AlbumEntry) -> bool,
+        allow_track: impl Fn(&TrackEntry) -> bool,
+    ) -> Results {
         let Some(q) = Query::new(query) else { return Results::default() };
         // Artists with more albums, then shorter (more specific) names win ties.
-        let artists = scored(&q, &self.artist_hay, &mut self.matcher, |i| self.artists[i].albums as i64);
-        let albums = scored(&q, &self.album_hay, &mut self.matcher, |_| 0);
-        let tracks = scored(&q, &self.track_hay, &mut self.matcher, |_| 0);
+        let artists = scored_where(&q, &self.artist_hay, &mut self.matcher, |i| allow_artist(&self.artists[i]), |i| self.artists[i].albums as i64);
+        let albums = scored_where(&q, &self.album_hay, &mut self.matcher, |i| allow_album(&self.albums[i]), |_| 0);
+        let tracks = scored_where(&q, &self.track_hay, &mut self.matcher, |i| allow_track(&self.tracks[i]), |_| 0);
 
         // The top hit is the best literal match; on equal rank artists come
         // before albums before tracks. Pure fuzzy matches never make it.

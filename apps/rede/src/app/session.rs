@@ -5,6 +5,11 @@
 //! Signing out forgets local tokens and asks the server to end its login as
 //! a best effort. The shelf and downloaded art stay where they are, so signing
 //! back in finds the library at once.
+//!
+//! Signing in while an account is in view (the switcher's Add source…) runs
+//! beside it: each step goes through [`Bridge::beside`](crate::bridge::Bridge::beside),
+//! so the account in view keeps its session and its login until the new one
+//! signs in, and a cancel leaves it as it was.
 
 use super::{Action, RedeApp};
 use crate::failure::SIGNED_OUT;
@@ -12,6 +17,7 @@ use crate::settings::{Account, SignInMethod};
 use crate::sync::Outcome;
 use shelf::Shelf;
 use shell::icons::Icon;
+use shell::kit;
 use shell::theme::{self, Tokens};
 use sources::Source;
 use std::sync::Arc;
@@ -78,11 +84,24 @@ impl RedeApp {
     pub(super) fn signed_in(&mut self, account: Account, source: Arc<dyn Source>, shelf: Arc<Shelf>, warning: Option<String>) {
         // Another account signed in: what's on screen came from the old one.
         let changed = self.session.account.as_ref().map(|a| a.id) != Some(account.id);
+        // Signed in beside an account in view: its session goes, and its
+        // work still in flight with it.
+        let beside = self.session.signed_in();
+        if beside || (changed && self.session.account.is_some()) {
+            let finished = self.teardown_session();
+            if beside {
+                self.bridge.end_session();
+            }
+            self.bridge.track_finish(finished);
+        }
+        self.bridge.adopt_login();
+        let account = Account { signed_out: false, ..account };
         self.session = Session { account: Some(account.clone()), source: Some(source.clone()), shelf: Some(shelf.clone()), connecting: false };
         self.bridge.close_downloads(self.downloads.store.clone());
         self.downloads = Default::default();
         self.bridge.open_downloads(account.id, self.shown.downloads.limit, self.stream_dir.clone(), self.downloads.store.clone());
         self.login = None;
+        self.source_added();
         self.openid.pending = None;
         self.openid.exchanging = false;
         self.art.set_source(Some(source.clone()));
@@ -98,6 +117,7 @@ impl RedeApp {
             self.downloads.store.clone(),
         ));
         self.prefs.edit(|s| s.put_account(account.clone()));
+        self.shown = super::PrefsView::read(&self.prefs);
         if changed {
             self.stats = Default::default();
             self.books.clear();
@@ -142,6 +162,7 @@ impl RedeApp {
     }
 
     pub(super) fn check_server(&mut self) {
+        let bridge = self.sign_in_bridge();
         let Some(form) = self.login.as_mut().filter(|f| !f.busy) else { return };
         if form.server.trim().is_empty() {
             form.error = Some("Enter the server's address, for example books.example.com.".into());
@@ -151,10 +172,17 @@ impl RedeApp {
         form.status = None;
         form.error = None;
         form.checked_server = form.server.trim().to_owned();
-        self.bridge.server_status(Account::new(&form.checked_server, ""));
+        bridge.server_status(Account::new(&form.checked_server, ""));
+    }
+
+    /// The bridge for a sign-in step: beside the account in view, if one
+    /// is.
+    fn sign_in_bridge(&self) -> crate::bridge::Bridge {
+        self.bridge.beside(self.session.signed_in())
     }
 
     pub(super) fn begin_openid(&mut self) {
+        let bridge = self.sign_in_bridge();
         let Some(form) = self.login.as_mut().filter(|f| !f.busy && f.status.is_some() && f.server.trim() == f.checked_server) else { return };
         if !crate::openid::SUPPORTED {
             form.error = Some("Browser sign-in is only available on macOS for now. Use an Audiobookshelf password on Linux.".into());
@@ -164,7 +192,7 @@ impl RedeApp {
         form.error = None;
         let account =
             form.account.clone().map(|a| Account { server: form.checked_server.clone(), ..a }).unwrap_or_else(|| Account::new(&form.checked_server, ""));
-        self.bridge.begin_openid(account, form.warning.clone());
+        bridge.begin_openid(account, form.warning.clone());
     }
 
     pub(super) fn handle_sign_in(&mut self, msg: crate::bridge::AccountMsg) {
@@ -210,13 +238,8 @@ impl RedeApp {
                     return;
                 }
                 let username = login.user.username.unwrap_or_default();
-                let account = if account.username.is_empty() || account.username == username {
-                    Account { username, ..account }
-                } else {
-                    Account::new(account.server, username)
-                };
-                let account = Account { sign_in: Some(SignInMethod::OpenId), ..account };
-                self.bridge.accept_openid(account, client, login.tokens, warning);
+                let account = self.prefs.get(|s| s.account_for_sign_in(account.server, username, Some(SignInMethod::OpenId)));
+                self.sign_in_bridge().accept_openid(account, client, login.tokens, warning);
             }
             _ => {}
         }
@@ -266,7 +289,7 @@ impl RedeApp {
     }
 
     pub(super) fn cancel_sign_in(&mut self, reason: abs::OpenIdError) {
-        self.bridge.cancel_login();
+        self.sign_in_bridge().cancel_login();
         self.openid.exchanging = false;
         self.openid.pending = None;
         self.openid.early_redirect = None;
@@ -285,6 +308,7 @@ impl RedeApp {
             self.check_server();
             return;
         }
+        let bridge = self.sign_in_bridge();
         let Some(form) = self.login.as_mut().filter(|f| !f.busy) else { return };
         let server = form.server.trim().to_owned();
         let username = form.username.trim().to_owned();
@@ -302,28 +326,20 @@ impl RedeApp {
         }
         form.busy = true;
         form.error = None;
-        // The same user on a new address is the same account (its shelf and
-        // progress stay); another user is another one.
-        let account = match form.account.clone() {
-            Some(a) if a.username == username => Account { server, username, ..a },
-            _ => Account::new(server, username),
-        };
-        let account = Account { sign_in: Some(SignInMethod::Password), ..account };
+        let account = self.prefs.get(|s| s.account_for_sign_in(server, username, Some(SignInMethod::Password)));
         form.account = Some(account.clone());
         self.session.connecting = true;
-        self.bridge.sign_in(account, form.password.clone());
+        bridge.sign_in(account, form.password.clone());
     }
 
-    /// Signs out: the tokens go, and nothing else. The sign-in screen comes
-    /// back with the account filled in, and anything in flight is dropped.
-    pub(super) fn sign_out(&mut self) {
-        let Some(account) = self.session.account.clone().or_else(|| self.prefs.get(|s| s.account().cloned())) else { return };
+    /// Stops playback, finishes the listening worker and clears the active
+    /// account's in-memory state so either signing out or switching starts clean.
+    pub(super) fn teardown_session(&mut self) -> Option<tokio::sync::oneshot::Receiver<()>> {
         self.set_mode(crate::window::Mode::Full);
         self.playback_control(crate::player::Control::Stop);
         self.playback_generation += 1;
         self.opening = false;
         let finished = self.listening.take().map(crate::listening::Listening::finish);
-        self.bridge.sign_out_after(account.clone(), self.session.source.clone(), finished);
         if let Some(engine) = self.engine.take() {
             engine.shutdown(Duration::from_secs(2));
         }
@@ -341,7 +357,44 @@ impl RedeApp {
         self.sync = super::SyncState::default();
         self.ui.nav = super::Nav::default();
         self.ui.notice = None;
+        finished
+    }
+
+    /// Switches to `id`, stopping playback and flushing pending progress for
+    /// the current account before opening the target shelf and session.
+    pub(super) fn switch_account(&mut self, id: accounts::AccountId) {
+        let Some(account) = self.prefs.get(|s| s.account_by_id(id).cloned()) else { return };
+        if self.session.account.as_ref().map(|a| a.id) == Some(id) && (self.session.signed_in() || self.session.connecting) && !account.signed_out {
+            return;
+        }
+        let finished = self.teardown_session();
+        self.openid.pending = None;
+        self.openid.exchanging = false;
+        self.prefs.edit(|s| s.scope.choose_one(id));
+        self.shown = super::PrefsView::read(&self.prefs);
+        if account.signed_out {
+            self.bridge.end_session();
+            self.bridge.track_finish(finished);
+            self.login = Some(LoginForm::for_account(Some(&account)));
+        } else {
+            self.login = None;
+            self.session = Session { connecting: true, ..Session::default() };
+            self.bridge.switch_account(account, finished);
+        }
+    }
+
+    /// Signs out: the tokens go, and nothing else. The sign-in screen comes
+    /// back with the account filled in, and anything in flight is dropped.
+    pub(super) fn sign_out(&mut self) {
+        let Some(mut account) = self.session.account.clone().or_else(|| self.prefs.get(|s| s.account().cloned())) else { return };
+        account.signed_out = true;
+        let source = self.session.source.clone();
+        self.prefs.edit(|s| s.set_signed_out(account.id, true));
+        self.shown = super::PrefsView::read(&self.prefs);
+        let finished = self.teardown_session();
+        self.bridge.sign_out_after(account.clone(), source, finished);
         self.login = Some(LoginForm::for_account(Some(&account)));
+        self.onboarding = Some(kit::OnboardingStep::Kinds);
     }
 
     /// Signs out and says why: the server turned the saved login down.
@@ -419,11 +472,13 @@ impl RedeApp {
         self.ctx.request_repaint_after(wait);
     }
 
-    /// The sign-in screen. The server chooses which ways in the form offers;
-    /// when it offers its provider, that leads (most accounts use it) and the
-    /// password form follows under a divider, so one button is plainly the
-    /// main one.
-    pub(super) fn login_ui(&mut self, ui: &mut egui::Ui) {
+    /// The sign-in form, in the first-run sheet's column. The server
+    /// chooses which ways in the form offers; when it offers its provider,
+    /// that leads (most accounts use it) and the password form follows under
+    /// a divider, so one button is plainly the main one. `compact` is a short
+    /// window: less space, and no help for an address the server has already
+    /// answered at.
+    pub(super) fn login_form(&mut self, ui: &mut egui::Ui, compact: bool) {
         let Some(form) = self.login.as_mut() else { return };
         let t = Tokens::of(ui);
         let waiting = self.openid.pending.as_ref();
@@ -443,175 +498,128 @@ impl RedeApp {
             None => None,
         };
         let spin = spin(ui, phase);
-        egui::CentralPanel::default().frame(egui::Frame::new().fill(t.bg)).show(ui, |ui| {
-            let strip = egui::Rect::from_min_size(ui.max_rect().min, egui::vec2(ui.max_rect().width(), super::BAR_H));
-            let bar = ui.interact(strip, ui.scope_id().with("login-titlebar"), egui::Sense::click_and_drag());
-            if bar.drag_started() {
-                ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
-            }
-            if bar.double_clicked() {
-                shell::chrome::title_double_click(ui.ctx());
-            }
-            // Roughly how tall the column is, so it sits a little above the
-            // middle whatever the server offers.
-            let form_h = if let Some(pending) = waiting {
-                if pending.flow.used_fallback() { 360.0 } else { 260.0 }
-            } else if oidc && local {
-                400.0
-            } else if local {
-                320.0
-            } else {
-                250.0
-            };
-            let room = ui.available_height();
-            // A short window keeps the buttons in view: a smaller heading, and
-            // no help for an address the server has already answered at.
-            let compact = room < form_h + 160.0;
-            // Shorter still, it scrolls rather than cutting the error off.
-            egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-                ui.add_space(((room - form_h) * 0.42).max(if compact { 12.0 } else { 24.0 }));
-                ui.vertical_centered(|ui| {
-                    ui.label(egui::RichText::new("Rede").font(egui::FontId::new(if compact { 22.0 } else { 28.0 }, theme::semibold())).color(t.text));
-                    if !compact {
-                        ui.add_space(4.0);
-                        ui.label(egui::RichText::new("Sign in to Audiobookshelf").size(13.0).color(t.muted));
-                    }
-                    ui.add_space(if compact { 14.0 } else { 24.0 });
-                });
-                ui.horizontal(|ui| {
-                    ui.add_space(((ui.available_width() - FORM_W) / 2.0).max(0.0));
-                    ui.vertical(|ui| {
-                        ui.set_width(FORM_W);
-                        ui.spacing_mut().item_spacing.y = 4.0;
-                        if let Some(pending) = waiting {
-                            action = waiting_ui(ui, &t, pending, exchanging, spin);
-                            return;
-                        }
-                        if let Some(message) = custom_message {
-                            ui.add(egui::Label::new(egui::RichText::new(message).size(12.0).color(t.muted)).wrap());
-                            ui.add_space(14.0);
-                        }
-                        let mut enter = false;
-                        // The error, if there is one, goes under the field it's
-                        // about; one about the sign-in as a whole waits below
-                        // the buttons.
-                        let error = form.error.clone();
-                        let on = error.as_deref().and_then(error_field);
-                        ui.add_enabled_ui(!form.busy, |ui| {
-                            enter |= login_field(ui, &t, Field::Server, &mut form.server, "books.example.com", !form.focused, on == Some(Field::Server));
-                            form.focused = true;
-                            if on == Some(Field::Server)
-                                && let Some(error) = &error
-                            {
-                                field_error(ui, &t, Field::Server, error);
-                            }
-                            if !(compact && status.is_some()) {
-                                ui.label(egui::RichText::new("Your Audiobookshelf server's address").size(11.0).color(t.muted));
-                            }
-                        });
-                        // The button that's waiting on the server says so; the
-                        // rest are greyed out until it answers.
-                        let form_busy = form.busy;
-                        let button = |ui: &mut egui::Ui, label: &str, primary: bool, busy: bool| {
-                            if form_busy && busy {
-                                form_button(ui, label, primary, Some(spin));
-                                false
-                            } else {
-                                ui.add_enabled_ui(!form_busy, |ui| form_button(ui, label, primary, None)).inner.clicked()
-                            }
-                        };
-                        // The space above a button, less when room is short.
-                        let gap = if compact { 12.0 } else { 18.0 };
-                        if status.is_none() {
-                            ui.add_space(gap);
-                            if button(ui, "Sign in", true, true) || enter {
-                                action = Some(Action::CheckServer);
-                            }
-                        }
-                        if oidc {
-                            ui.add_space(gap);
-                            if button(ui, oidc_label, true, !password_busy) {
-                                action = Some(Action::OpenId);
-                            }
-                            if !local {
-                                ui.add_space(6.0);
-                                ui.vertical_centered(|ui| {
-                                    ui.label(egui::RichText::new("You'll finish signing in in your browser.").size(11.0).color(t.muted));
-                                });
-                            }
-                        }
-                        if local {
-                            if oidc {
-                                ui.add_space(if compact { 8.0 } else { 14.0 });
-                                or_divider(ui, &t);
-                                ui.add_space(if compact { 2.0 } else { 6.0 });
-                            } else {
-                                ui.add_space(10.0);
-                            }
-                            ui.add_enabled_ui(!form.busy, |ui| {
-                                enter |= login_field(ui, &t, Field::Username, &mut form.username, "", false, on == Some(Field::Username));
-                                if on == Some(Field::Username)
-                                    && let Some(error) = &error
-                                {
-                                    field_error(ui, &t, Field::Username, error);
-                                }
-                                ui.add_space(10.0);
-                                enter |= login_field(ui, &t, Field::Password, &mut form.password, "", false, on == Some(Field::Password));
-                                if on == Some(Field::Password)
-                                    && let Some(error) = &error
-                                {
-                                    field_error(ui, &t, Field::Password, error);
-                                }
-                            });
-                            ui.add_space(gap);
-                            if button(ui, "Sign in", !oidc, password_busy || !oidc) || enter {
-                                action = Some(Action::SignIn);
-                            }
-                        }
-                        if status.is_some() && !local && !oidc {
-                            ui.add_space(14.0);
-                            notice(
-                                ui,
-                                &t,
-                                "No way to sign in",
-                                if crate::openid::SUPPORTED {
-                                    "This server offers no sign-in method Rede supports. Ask its admin to turn on passwords or OpenID."
-                                } else {
-                                    "Browser sign-in is only available on macOS for now. Ask your admin to enable an Audiobookshelf password for this account."
-                                },
-                            );
-                        }
-                        if let Some(error) = &form.error
-                            && error_field(error).is_none()
-                        {
-                            ui.add_space(12.0);
-                            let shown = ui.add(egui::Label::new(egui::RichText::new(error).size(12.0).color(t.danger)).wrap());
-                            shown.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Label, true, format!("Sign-in error: {error}")));
-                        }
-                        if let Some(warning) = &form.warning {
-                            ui.add_space(14.0);
-                            notice(ui, &t, "Update recommended", warning);
-                        }
-                        // A server that takes the connection and then says
-                        // nothing would hold the form until the request times out.
-                        if form.busy {
-                            ui.add_space(16.0);
-                            ui.vertical_centered(|ui| {
-                                if crate::widgets::link(ui, "Cancel", egui::FontId::proportional(12.0), t.accent).clicked() {
-                                    action = Some(Action::CancelSignIn);
-                                }
-                            });
-                        }
-                    });
-                });
-                ui.add_space(24.0);
-            });
-        });
-        if let Some(action) = action {
-            self.actions.push(action);
+        if let Some(pending) = waiting {
+            self.actions.extend(waiting_ui(ui, &t, pending, exchanging, spin));
+            return;
         }
-        for action in std::mem::take(&mut self.actions) {
-            self.apply(action);
+        if let Some(message) = custom_message {
+            ui.add(egui::Label::new(egui::RichText::new(message).size(12.0).color(t.muted)).wrap());
+            ui.add_space(14.0);
+        }
+        let mut enter = false;
+        // The error, if there is one, goes under the field it's
+        // about; one about the sign-in as a whole waits below
+        // the buttons.
+        let error = form.error.clone();
+        let on = error.as_deref().and_then(error_field);
+        let about = |field: Field| error.as_deref().filter(|_| on == Some(field));
+        ui.add_enabled_ui(!form.busy, |ui| {
+            enter |= kit::TextField::new(Field::Server.label())
+                .hint("books.example.com")
+                .focus(!form.focused)
+                .error(about(Field::Server))
+                .help((!(compact && status.is_some())).then_some("Your Audiobookshelf server's address"))
+                .show(ui, &mut form.server);
+            form.focused = true;
+        });
+        // The button that's waiting on the server says so; the
+        // rest are greyed out until it answers.
+        let form_busy = form.busy;
+        let button = |ui: &mut egui::Ui, label: &str, primary: bool, busy: bool| {
+            if form_busy && busy {
+                kit::form_button(ui, "Connecting…", primary, Some(spin));
+                false
+            } else {
+                ui.add_enabled_ui(!form_busy, |ui| kit::form_button(ui, label, primary, None)).inner.clicked()
+            }
+        };
+        // The space above a button, less when room is short.
+        let gap = if compact { 12.0 } else { 18.0 };
+        if status.is_none() {
+            ui.add_space(gap);
+            if button(ui, "Sign in", true, true) || enter {
+                action = Some(Action::CheckServer);
+            }
+        }
+        if oidc {
+            ui.add_space(gap);
+            if button(ui, oidc_label, true, !password_busy) {
+                action = Some(Action::OpenId);
+            }
+            if !local {
+                ui.add_space(6.0);
+                ui.vertical_centered(|ui| {
+                    ui.label(egui::RichText::new("You'll finish signing in in your browser.").size(11.0).color(t.muted));
+                });
+            }
+        }
+        if local {
+            if oidc {
+                ui.add_space(if compact { 8.0 } else { 14.0 });
+                kit::or_divider(ui);
+                ui.add_space(if compact { 2.0 } else { 6.0 });
+            } else {
+                ui.add_space(10.0);
+            }
+            ui.add_enabled_ui(!form.busy, |ui| {
+                enter |= kit::TextField::new(Field::Username.label()).error(about(Field::Username)).show(ui, &mut form.username);
+                ui.add_space(10.0);
+                enter |= kit::TextField::new(Field::Password.label()).password(true).error(about(Field::Password)).show(ui, &mut form.password);
+            });
+            ui.add_space(gap);
+            if button(ui, "Sign in", !oidc, password_busy || !oidc) || enter {
+                action = Some(Action::SignIn);
+            }
+        }
+        if status.is_some() && !local && !oidc {
+            ui.add_space(14.0);
+            kit::notice(
+                ui,
+                "No way to sign in",
+                if crate::openid::SUPPORTED {
+                    "This server offers no sign-in method Rede supports. Ask its admin to turn on passwords or OpenID."
+                } else {
+                    "Browser sign-in is only available on macOS for now. Ask your admin to enable an Audiobookshelf password for this account."
+                },
+            );
+        }
+        if let Some(error) = &form.error
+            && error_field(error).is_none()
+        {
+            ui.add_space(12.0);
+            kit::field_error(ui, "Sign-in error", error);
+        }
+        if let Some(warning) = &form.warning {
+            ui.add_space(14.0);
+            kit::notice(ui, "Update recommended", warning);
+        }
+        // A server that takes the connection and then says
+        // nothing would hold the form until the request times out.
+        if form.busy {
+            ui.add_space(16.0);
+            ui.vertical_centered(|ui| {
+                if crate::widgets::link(ui, "Cancel", egui::FontId::proportional(12.0), t.accent).clicked() {
+                    action = Some(Action::CancelSignIn);
+                }
+            });
+        }
+        self.actions.extend(action);
+    }
+
+    /// Roughly how tall the sign-in form is, whatever the server offers.
+    pub(super) fn login_form_height(&self) -> f32 {
+        let Some(form) = self.login.as_ref() else { return 0.0 };
+        let status = form.status.as_ref().filter(|_| form.checked_server == form.server.trim());
+        let local = status.is_some_and(|s| s.auth_methods.is_empty() || s.auth_methods.iter().any(|m| m == "local"));
+        let oidc = crate::openid::SUPPORTED && status.is_some_and(|s| s.auth_methods.iter().any(|m| m == "openid"));
+        if let Some(pending) = self.openid.pending.as_ref() {
+            if pending.flow.used_fallback() { 300.0 } else { 200.0 }
+        } else if oidc && local {
+            340.0
+        } else if local {
+            260.0
+        } else {
+            190.0
         }
     }
 
@@ -624,9 +632,6 @@ impl RedeApp {
         }
     }
 }
-
-/// The sign-in column's width, Ond's.
-const FORM_W: f32 = 320.0;
 
 /// Waiting for the browser: what's happening, a way out, and a way back to
 /// the page if its tab went missing. Centred, since there's nothing to fill
@@ -659,7 +664,7 @@ fn waiting_ui(ui: &mut egui::Ui, t: &Tokens, pending: &crate::openid::Pending, e
     });
     if pending.flow.used_fallback() {
         ui.add_space(22.0);
-        notice(ui, t, "Rede's link isn't allowed on this server", crate::openid::FALLBACK);
+        kit::notice(ui, "Rede's link isn't allowed on this server", crate::openid::FALLBACK);
     }
     action
 }
@@ -700,86 +705,6 @@ fn spin(ui: &egui::Ui, phase: Option<Phase>) -> bool {
     turning
 }
 
-/// One of the form's full-width buttons: the accent fill for the main way in,
-/// the quiet field fill for the other. `busy` is `Some` on the one waiting
-/// for the server, which says so (with a spinner while `Some(true)`) and takes
-/// no clicks.
-fn form_button(ui: &mut egui::Ui, label: &str, primary: bool, busy: Option<bool>) -> egui::Response {
-    let t = Tokens::of(ui);
-    let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 34.0), if busy.is_some() { egui::Sense::hover() } else { egui::Sense::click() });
-    let hovered = resp.hovered() && busy.is_none();
-    let (fill, ink) = match (primary, busy.is_some(), hovered) {
-        (true, true, _) => (t.accent.gamma_multiply(0.6), t.on_accent),
-        (true, false, true) => (t.accent.gamma_multiply(0.88), t.on_accent),
-        (true, false, false) => (t.accent, t.on_accent),
-        (false, _, true) => (t.selected, t.accent),
-        (false, _, false) => (t.field, t.accent),
-    };
-    let text = if busy.is_some() { "Connecting…" } else { label };
-    if ui.is_rect_visible(rect) {
-        let p = ui.painter();
-        p.rect_filled(rect, 7.0, fill);
-        // A long provider name is cut rather than spilling out of the button.
-        let galley = crate::widgets::elide(ui, text, egui::FontId::new(13.0, theme::semibold()), ink, rect.width() - 56.0);
-        p.galley(rect.center() - galley.size() / 2.0, galley, ink);
-        if busy == Some(true) {
-            let r = egui::Rect::from_center_size(egui::pos2(rect.left() + 18.0, rect.center().y), egui::vec2(14.0, 14.0));
-            shell::icons::paint(p, r, Icon::Spinner, ink);
-        }
-        shell::kit::focus_ring(ui, &resp, rect, 7.0);
-    }
-    let (text, enabled) = (text.to_owned(), ui.is_enabled() && busy.is_none());
-    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, enabled, &text));
-    if busy.is_none() { resp.on_hover_cursor(egui::CursorIcon::PointingHand) } else { resp }
-}
-
-/// A hairline either side of a small "or", between the provider and the
-/// password.
-fn or_divider(ui: &mut egui::Ui, t: &Tokens) {
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 18.0), egui::Sense::hover());
-    let p = ui.painter();
-    let galley = p.layout_no_wrap("or".to_owned(), egui::FontId::proportional(11.0), t.muted);
-    let gap = galley.size().x / 2.0 + 10.0;
-    let (y, mid) = (rect.center().y, rect.center().x);
-    let stroke = egui::Stroke::new(1.0, t.hairline);
-    p.hline(rect.left()..=mid - gap, y, stroke);
-    p.hline(mid + gap..=rect.right(), y, stroke);
-    p.galley(rect.center() - galley.size() / 2.0, galley, t.muted);
-}
-
-/// Something the form wants read but can't act on, outlined as Ond outlines
-/// its notices: a short title, then the detail in muted text.
-fn notice(ui: &mut egui::Ui, t: &Tokens, title: &str, body: &str) {
-    egui::Frame::new().stroke(egui::Stroke::new(1.0, t.hairline)).corner_radius(8).inner_margin(egui::Margin::same(12)).show(ui, |ui| {
-        ui.set_width(ui.available_width());
-        ui.spacing_mut().item_spacing.y = 2.0;
-        ui.label(egui::RichText::new(title).font(egui::FontId::new(12.5, theme::semibold())).color(t.text));
-        ui.add(egui::Label::new(egui::RichText::new(body).size(12.0).color(t.muted)).wrap());
-    });
-}
-
-fn login_field(ui: &mut egui::Ui, t: &Tokens, field: Field, text: &mut String, hint: &str, focus: bool, refused: bool) -> bool {
-    let label = field.label();
-    ui.label(egui::RichText::new(label).font(egui::FontId::new(12.0, theme::semibold())).color(t.muted));
-    let r = ui.add(
-        egui::TextEdit::singleline(text)
-            .hint_text(hint)
-            .password(field == Field::Password)
-            .desired_width(f32::INFINITY)
-            .margin(egui::vec2(10.0, 7.0))
-            .background_color(t.field),
-    );
-    r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::TextInput, true, label));
-    // The border says which field the error below it is about.
-    if refused {
-        ui.painter().rect_stroke(r.rect, 4.0, egui::Stroke::new(1.0, t.danger), egui::StrokeKind::Inside);
-    }
-    if focus {
-        r.request_focus();
-    }
-    r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter))
-}
-
 /// The field a sign-in error is about, so it can be shown under it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Field {
@@ -815,14 +740,6 @@ fn error_field(error: &str) -> Option<Field> {
         || error.contains("not like an Audiobookshelf server")
         || error.contains("instead of the server's API");
     address.then_some(Field::Server)
-}
-
-/// What went wrong with one field, under it in the danger colour and named
-/// with the field, so a screen reader says which one it's about.
-fn field_error(ui: &mut egui::Ui, t: &Tokens, field: Field, error: &str) {
-    let resp = ui.add(egui::Label::new(egui::RichText::new(error).size(12.0).color(t.danger)).wrap());
-    let name = format!("{}: {error}", field.label());
-    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Label, true, &name));
 }
 
 #[cfg(test)]

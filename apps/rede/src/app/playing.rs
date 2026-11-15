@@ -41,7 +41,7 @@ impl RedeApp {
             self.show_failure(Failure::Local("Not connected. Sign in to play this book.".into()));
             return;
         };
-        let key = sources::ItemKey::new(account.id, id);
+        let key = accounts::ItemKey::new(account.id, id);
         let Some(listening) = self.start_listening() else {
             self.show_failure(Failure::Local("Not connected. Sign in to play this book.".into()));
             return;
@@ -132,7 +132,7 @@ impl RedeApp {
             self.show_failure(Failure::Local("Not connected. Sign in to change this book's progress.".into()));
             return;
         };
-        let key = sources::ItemKey::new(account.id, id);
+        let key = accounts::ItemKey::new(account.id, id);
         let stamp = SystemTime::now().max(
             self.positions
                 .get(&key.item)

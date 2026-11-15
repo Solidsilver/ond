@@ -298,7 +298,7 @@ fn a_set_aside_list_of_downloads_is_shown_and_removed_after_asking() {
     drop(store);
     std::fs::write(folder.join("offline.json"), b"{\"pins\": [tor").unwrap();
     std::fs::write(folder.join("lost.flac"), vec![0u8; 3000]).unwrap();
-    app.downloads.store = Some((app.downloads.open)(folder.clone(), None).unwrap());
+    app.downloads.store = Some((app.downloads.open)(folder.clone(), None, app.session.account()).unwrap());
     app.downloads.refresh();
     let bad = || std::fs::read_dir(&folder).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().starts_with("offline.json.bad-")).count();
     assert_eq!(bad(), 1);
@@ -324,6 +324,31 @@ fn a_set_aside_list_of_downloads_is_shown_and_removed_after_asking() {
     *h.state_mut() = None;
 }
 
+/// The footer's switcher names the server and, when it isn't simply
+/// connected, says what it's doing: a turned-down login as the source's
+/// state, the rest in Ond's own words.
+#[test]
+fn the_footer_says_what_the_server_is_doing() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = full_window(dir.path());
+    reset(&mut h, FULL, Route::Recent);
+    let footer = |h: &Harness<'static, Option<OndApp>>, label: &str| h.query_by_role_and_label(egui::accesskit::Role::Button, label).is_some();
+    assert!(footer(&h, "music.example.com"));
+    for (online, work_offline, sign_in, unreachable, said) in [
+        (false, false, None, false, "music.example.com, Connecting…"),
+        (false, false, None, true, "music.example.com, Can't reach the server"),
+        (false, true, None, false, "music.example.com, Offline mode"),
+        (false, false, Some("Wrong username or password."), false, "music.example.com, Signed out"),
+    ] {
+        let app = app_mut(&mut h);
+        (app.session.online, app.session.work_offline, app.session.unreachable) = (online, work_offline, unreachable);
+        app.session.sign_in = sign_in.map(str::to_owned);
+        h.run_steps(2);
+        assert!(footer(&h, said), "{said}");
+    }
+    *h.state_mut() = None;
+}
+
 /// Sign out in the server popover asks first: Cancel keeps the session, and
 /// only the dialog's own Sign out signs out.
 #[test]
@@ -332,7 +357,7 @@ fn signing_out_from_the_server_popover_waits_for_the_answer() {
     let mut h = full_window(dir.path());
     reset(&mut h, FULL, Route::Recent);
     let ask = |h: &mut Harness<'static, Option<OndApp>>| {
-        h.get_by_label("Connected to music.example.com. Click for details.").click();
+        h.get_by_role_and_label(egui::accesskit::Role::Button, "music.example.com").click();
         h.run_steps(2);
         // A frame with the pointer over it first: the popover settles where it
         // goes, and the click lands on the item and not where it was.
@@ -356,6 +381,69 @@ fn signing_out_from_the_server_popover_waits_for_the_answer() {
     h.run_steps(3);
     let app = app_mut(&mut h);
     assert!(app.login.is_some() && !app.session.online, "signed out once confirmed");
+    assert!(app.onboarding.is_some(), "on the first-run sheet");
+    *h.state_mut() = None;
+}
+
+/// Without a login the window is the first-run sheet: a kind that isn't
+/// here yet can't be picked, Navidrome opens the login form and Back the
+/// tiles, and once the server answers the library opens: Ond holds one
+/// server, so there's no step that only says Done.
+#[test]
+fn signing_in_goes_through_the_first_run_sheet() {
+    use shell::kit::OnboardingStep;
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = full_window(dir.path());
+    reset(&mut h, FULL, Route::Recent);
+    app_mut(&mut h).login = Some(session::LoginForm { server: "http://127.0.0.1:9".into(), ..Default::default() });
+    app_mut(&mut h).onboarding = Some(onboarding::Onboard::default());
+    h.run_steps(2);
+    let step = |h: &mut Harness<'static, Option<OndApp>>| app_mut(h).onboarding.as_ref().map(|o| o.step);
+    h.get_by_label("Where's your music?");
+    assert!(h.query_by_label("Done").is_none(), "no way on without a server");
+    assert!(h.query_by_label_contains("Recently added").is_none(), "nothing else shows");
+    h.get_by_label("Jellyfin, coming later").click();
+    h.run_steps(2);
+    assert_eq!(step(&mut h), Some(OnboardingStep::Kinds), "Jellyfin can't be picked yet");
+
+    h.get_by_label_contains("Navidrome, ").click();
+    h.run_steps(2);
+    assert_eq!(step(&mut h), Some(OnboardingStep::Form(0)));
+    h.get_by_role_and_label(egui::accesskit::Role::TextInput, "Server");
+    h.get_by_label("Back").click();
+    h.run_steps(2);
+    assert_eq!(step(&mut h), Some(OnboardingStep::Kinds));
+
+    h.get_by_label_contains("Navidrome, ").click();
+    h.run_steps(2);
+    {
+        let form = app_mut(&mut h).login.as_mut().unwrap();
+        form.username = "u".into();
+        form.password = "p".into();
+    }
+    h.get_by_label("Connect").click();
+    h.run_steps(2);
+    assert!(app_mut(&mut h).login.as_ref().is_some_and(|f| f.busy), "connecting");
+    assert!(h.query_by_label("Back").is_none(), "no way back while it waits");
+
+    let app = app_mut(&mut h);
+    let settings = crate::settings::Settings {
+        sources: vec![crate::settings::SourceEntry::subsonic(accounts::AccountId::new(), "https://music.example.com", "u")],
+        ..Default::default()
+    };
+    app.handle(Msg::Connected {
+        stores: None,
+        session: app.bridge.session(),
+        source: crate::source::subsonic::test_source(),
+        settings: Box::new(settings),
+        server: "navidrome 0.64.2".into(),
+        new_account: false,
+        password_saved: true,
+    });
+    h.run_steps(2);
+    assert_eq!(step(&mut h), None, "the sheet is gone");
+    assert!(!app_mut(&mut h).signing_in(), "the library is up");
+    assert!(h.query_by_label("Done").is_none() && h.query_by_label("Add another").is_none());
     *h.state_mut() = None;
 }
 
@@ -433,7 +521,7 @@ fn a_managed_zoom_stays_as_managed() {
 
 /// The full window with the fixture library, for the behaviour tests below.
 fn full_window(dir: &Path) -> Harness<'static, Option<OndApp>> {
-    window(dir, FULL, |ui, app| app.main_ui(ui))
+    window(dir, FULL, |ui, app| if app.signing_in() { app.sign_in_ui(ui) } else { app.main_ui(ui) })
 }
 
 /// A window `size` big with the fixture library, drawn by `draw`.
@@ -497,7 +585,7 @@ fn songs_selection_scrolls_away_with_the_wheel() {
         let app = app_mut(h);
         let order = app.view().songs_order();
         let t = &app.data.tracks.all[order[row]];
-        let playing = app.player.queue.current.as_ref().is_some_and(|c| c.track.id == t.id);
+        let playing = app.player.queue.current.as_ref().is_some_and(|c| crate::source::matches_track(&c.key, app.session.account(), &t.id));
         format!("{}, {}{}", t.title, t.artist.as_deref().unwrap_or(""), if playing { ", playing" } else { "" })
     };
     h.key_press(egui::Key::ArrowDown);
@@ -578,7 +666,7 @@ fn long_playlist(app: &mut OndApp, id: &str, n: usize) {
             t
         })
         .collect();
-    app.data.playlists.push(subsonic::Playlist { id: id.into(), name: "Long".into(), song_count: n as u32, duration: 0, cover_art: None, owner: None });
+    app.data.playlists.push(crate::source::Playlist { id: id.into(), name: "Long".into(), song_count: n as u32, duration: 0, cover_art: None, owner: None });
     app.data.playlist_tracks.insert(id.into(), Arc::new(tracks));
 }
 
@@ -737,6 +825,7 @@ fn every_view_names_its_controls() {
         Route::Albums,
         Route::Artists,
         Route::Songs,
+        Route::Playlists,
         Route::Favorites,
         Route::Offline,
         Route::Album(album_id(0)),
@@ -765,7 +854,7 @@ fn every_view_names_its_controls() {
         let pins = vec![
             pin(offline::Pin::Album(album_id(0)), "Album pin", 12),
             pin(offline::Pin::Playlist("pl-0".into()), "Playlist pin", 5),
-            pin(offline::Pin::Track("t-3".into()), "Song pin", 12),
+            pin(offline::Pin::Track(crate::test_tracks::key("t-3").to_string()), "Song pin", 12),
         ];
         app.downloads.snap = std::sync::Arc::new(offline::Snapshot { pins, ..(*app.downloads.snap).clone() });
     }
@@ -798,15 +887,49 @@ fn every_view_names_its_controls() {
     h.run_steps(2);
     assert!(app_mut(&mut h).ui.palette.is_some(), "the palette is open");
     h.check_accessibility();
-    for form in [
-        session::LoginForm { server: "http://localhost:4533".into(), ..Default::default() },
-        session::LoginForm { server: "https://music.example.com".into(), username: "demo".into(), busy: true, ..Default::default() },
+    // Signing in: the first-run sheet's tiles, Navidrome's form (and
+    // waiting on it), and the form on its own.
+    let form = || session::LoginForm { server: "http://localhost:4533".into(), ..Default::default() };
+    let busy = || session::LoginForm { server: "https://music.example.com".into(), username: "demo".into(), busy: true, ..Default::default() };
+    for (login, step) in [
+        (Some(form()), Some(shell::kit::OnboardingStep::Kinds)),
+        (Some(form()), Some(shell::kit::OnboardingStep::Form(0))),
+        (Some(busy()), Some(shell::kit::OnboardingStep::Form(0))),
+        (Some(session::LoginForm { closable: true, ..form() }), None),
     ] {
         reset(&mut h, FULL, Route::Recent);
-        app_mut(&mut h).login = Some(form);
+        app_mut(&mut h).login = login;
+        app_mut(&mut h).onboarding = step.map(|step| onboarding::Onboard { step, ..Default::default() });
+        h.run_steps(2);
+        assert!(h.query_by_label_contains("Where's your music?").is_some() || h.query_by_label("Navidrome").is_some(), "the sheet is drawn");
+        h.check_accessibility();
+    }
+    // A folder of music's form: empty, with folders, and scanning.
+    for (folders, busy) in
+        [(Vec::new(), false), (vec![std::path::PathBuf::from("/Users/demo/Music")], false), (vec![std::path::PathBuf::from("/Users/demo/Music")], true)]
+    {
+        reset(&mut h, FULL, Route::Recent);
+        let app = app_mut(&mut h);
+        app.login = Some(form());
+        let folders = sources::FolderForm { folders, busy, ..Default::default() };
+        app.onboarding = Some(onboarding::Onboard { step: shell::kit::OnboardingStep::Form(onboarding::FOLDER), folders, ..Default::default() });
+        h.run_steps(2);
+        assert!(h.query_by_label("Choose folder…").is_some(), "the folder form is drawn");
+        h.check_accessibility();
+    }
+    // A folder of music in use: the library, an album, and its Settings.
+    for route in [Route::Albums, Route::Album(album_id(0))] {
+        reset(&mut h, FULL, route);
+        use_folder(app_mut(&mut h));
         h.run_steps(2);
         h.check_accessibility();
     }
+    reset(&mut h, FULL, Route::Recent);
+    use_folder(app_mut(&mut h));
+    app_mut(&mut h).actions.push(Action::OpenSettings(settings_page::Section::Sources));
+    h.run_steps(2);
+    h.check_accessibility();
+    use_server(app_mut(&mut h));
     for section in [
         settings_page::Section::Appearance,
         settings_page::Section::Playback,
@@ -870,7 +993,7 @@ fn a_failed_loads_retry_asks_for_the_tracks_again() {
     let mut h = full_window(dir.path());
     reset(&mut h, FULL, Route::Recent);
     let app = app_mut(&mut h);
-    app.session.client = Some(subsonic::Client::new("http://127.0.0.1:9", subsonic::Credentials::new("u", "p")).unwrap());
+    app.session.source = Some(crate::source::subsonic::test_source());
     app.apply(Action::Album("al-missing".into(), QueueAction::Play { start: 0 }));
     assert_eq!(app.pending.len(), 1, "waits for the tracks");
     let text = "Couldn't load the album: the server said no";
@@ -929,4 +1052,249 @@ fn undo_puts_back_a_song_removed_from_a_playlist() {
     h.run_steps(2);
     let app = app_mut(&mut h);
     assert_eq!(app.data.playlist_tracks[&id].iter().map(|t| t.id.clone()).collect::<Vec<_>>(), before);
+}
+
+/// Manage sources… opens Settings on Sources, where the one server's row
+/// renames it in place and gives it a colour (both saved, and the switcher
+/// takes the name) and asks before signing out. It can't be
+/// removed while Ond holds one server.
+#[test]
+fn the_sources_tab_renames_and_recolours_the_server() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = full_window(dir.path());
+    reset(&mut h, FULL, Route::Recent);
+    h.get_by_role_and_label(egui::accesskit::Role::Button, "music.example.com").click();
+    h.run_steps(2);
+    h.get_by_label("Manage sources…").hover();
+    h.run_steps(1);
+    h.get_by_label("Manage sources…").click();
+    h.run_steps(3);
+    assert!(matches!(app_mut(&mut h).ui.overlay, Some(dialogs::Overlay::Settings)));
+    assert_eq!(app_mut(&mut h).ui.settings_section, settings_page::Section::Sources);
+    h.check_accessibility();
+    h.get_by_label_contains("music.example.com, Navidrome, ").click();
+    h.run_steps(2);
+    assert!(h.query_by_label("Remove…").is_none(), "one server can't be removed");
+    h.get_by_label("Sign out…");
+    h.get_by_label("Rename").click();
+    h.run_steps(3);
+    h.get_by_label("Source name").type_text("Home");
+    h.run();
+    h.key_press(egui::Key::Enter);
+    h.run_steps(3);
+    assert_eq!(app_mut(&mut h).prefs.snapshot().source_name(), Some("Home"));
+    h.get_by_label_contains("Home, Navidrome, ").click();
+    h.run_steps(2);
+    h.get_by_label("Green").click();
+    h.run_steps(3);
+    assert_eq!(app_mut(&mut h).prefs.snapshot().source_color(), accounts::SourceColor::new(2));
+    h.key_press(egui::Key::Escape);
+    h.run_steps(2);
+    h.get_by_role_and_label(egui::accesskit::Role::Button, "Home, music.example.com");
+    *h.state_mut() = None;
+}
+
+/// A server set in managed.json is the Nix config's: its row says so and
+/// offers no Rename, and a rename asked for anyway does nothing.
+#[test]
+fn a_managed_server_is_locked_in_the_sources_tab() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("managed.json"), MANAGED).unwrap();
+    let mut h = full_window(dir.path());
+    reset(&mut h, FULL, Route::Recent);
+    app_mut(&mut h).apply(Action::OpenSettings(settings_page::Section::Sources));
+    h.run_steps(2);
+    h.get_by_label_contains(crate::managed::LOCKED).click();
+    h.run_steps(2);
+    assert!(h.query_by_label("Rename").is_none());
+    h.get_by_label("Sign out…");
+    app_mut(&mut h).actions.push(Action::Prefs(PrefsAction::SourceName(crate::test_tracks::account(), "Elsewhere".into())));
+    h.run_steps(2);
+    assert_eq!(app_mut(&mut h).prefs.snapshot().source_name(), None, "locked");
+    *h.state_mut() = None;
+}
+
+/// A folder of music in use hides what it can't do (downloads, Offline, Work
+/// Offline and Sign out, scrobbling and streaming settings) while keeping
+/// Favorites and Playlists backed by Ond's store, and its Sources row rescans
+/// and asks before removing it, saying the music files are kept.
+#[test]
+fn a_folder_source_hides_what_it_cant_do_and_says_its_files_are_kept() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = full_window(dir.path());
+    reset(&mut h, FULL, Route::Album(album_id(0)));
+    assert!(h.query_by_label("Favorites").is_some() && h.query_by_label("Offline").is_some(), "a server has both");
+    use_folder(app_mut(&mut h));
+    h.run_steps(3);
+    assert!(h.query_by_label("Favorites").is_some(), "Favorites is shown via Ond's store");
+    assert!(h.query_by_label("Playlists").is_some(), "Playlists is shown via Ond's store");
+    assert!(h.query_by_label("Offline").is_none(), "Offline is hidden for a folder");
+    h.get_by_role_and_label(egui::accesskit::Role::Button, "Music").click();
+    h.run_steps(2);
+    assert!(h.query_by_label("Rescan").is_some());
+    assert!(h.query_by_label("Go offline").is_none() && h.query_by_label("Sign out…").is_none());
+    egui::Popup::close_all(&h.ctx);
+    app_mut(&mut h).apply(Action::OpenSettings(settings_page::Section::Playback));
+    h.run_steps(2);
+    assert!(h.query_by_label_contains("Scrobble").is_none() && h.query_by_label("Quality").is_none());
+    assert!(h.query_by_label("Account").is_none() && h.query_by_label("Offline").is_none(), "no server's sections");
+    app_mut(&mut h).apply(Action::OpenSettings(settings_page::Section::Sources));
+    h.run_steps(2);
+    h.get_by_label_contains("Music, Music folder, ").click();
+    h.run_steps(2);
+    h.get_by_label("Rescan");
+    assert!(h.query_by_label("Sign out…").is_none());
+    h.get_by_label("Remove…").click();
+    h.run_steps(3);
+    assert!(matches!(app_mut(&mut h).ui.overlay, Some(dialogs::Overlay::RemoveSource { .. })));
+    assert!(h.query_by_label_contains("Your music files are kept").is_some());
+    h.key_press(egui::Key::Escape);
+    h.run_steps(2);
+    assert!(matches!(app_mut(&mut h).ui.overlay, Some(dialogs::Overlay::Settings)), "No goes back to Settings");
+    use_server(app_mut(&mut h));
+    *h.state_mut() = None;
+}
+
+/// Two live sources in All sources: the chips, the switcher's menu, the
+/// merged artist's headings and the mixed-playlist offer all name
+/// themselves, and a chip narrows the library to its source.
+#[test]
+fn two_sources_name_their_controls_and_a_chip_narrows_the_library() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = full_window(dir.path());
+    reset(&mut h, FULL, Route::Albums);
+    two_sources(app_mut(&mut h));
+    for route in [Route::Albums, Route::Songs, Route::Playlists, Route::Favorites, Route::Artist { name: "Bill Evans Trio".into(), id: None }] {
+        reset(&mut h, FULL, route);
+        h.check_accessibility();
+    }
+    h.get_by_label("Home server");
+    h.get_by_label("Music folder");
+    reset(&mut h, FULL, Route::Albums);
+    let all = app_mut(&mut h).data.albums.len();
+    h.get_by_label("Music folder").click();
+    h.run_steps(3);
+    let app = app_mut(&mut h);
+    assert!(app.session.scope.chip_selected(local_account()));
+    assert!(app.data.albums.len() < all && app.data.albums.iter().all(|a| crate::source::identity::account(&a.id) == Some(local_account())));
+    h.get_by_label("All sources").click();
+    h.run_steps(3);
+    assert_eq!(app_mut(&mut h).data.albums.len(), all, "All sources shows every source again");
+
+    h.get_by_role_and_label(egui::accesskit::Role::Button, "All sources, 2 sources").click();
+    h.run_steps(2);
+    h.check_accessibility();
+    h.get_by_label("Music folder, Scanned 9:41 AM").click();
+    h.run_steps(3);
+    assert_eq!(app_mut(&mut h).session.scope.single(), Some(local_account()), "picking a source in the menu shows it alone");
+
+    // From there, the server's box in the menu shows both, and the switcher
+    // and the chips agree.
+    h.get_by_role_and_label(egui::accesskit::Role::Button, "Music folder, Scanned 9:41 AM").click();
+    h.run_steps(2);
+    h.get_by_role_and_label(egui::accesskit::Role::CheckBox, "Include Home server").click();
+    h.run_steps(3);
+    let scope = app_mut(&mut h).session.scope.clone();
+    assert!(scope.is_all() && scope.chip_selected(local_account()) && scope.chip_selected(crate::test_tracks::account()), "{scope:?}");
+    h.get_by_role_and_label(egui::accesskit::Role::CheckBox, "Include Music folder").click();
+    h.run_steps(3);
+    let scope = app_mut(&mut h).session.scope.clone();
+    assert!(scope.chip_selected(crate::test_tracks::account()) && !scope.chip_selected(local_account()), "{scope:?}");
+    h.check_accessibility();
+    *h.state_mut() = None;
+}
+
+/// With matching albums combined, the Albums group offers Prefer, and a
+/// combined album's menu offers Keep apart; its toast's Undo combines the
+/// album again, and Combine again does the same from either copy's menu.
+#[test]
+fn keep_apart_splits_a_combined_album_and_undo_or_combine_again_rejoins_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = full_window(dir.path());
+    reset(&mut h, FULL, Route::Recent);
+    two_sources(app_mut(&mut h));
+    combined_copies(app_mut(&mut h));
+    app_mut(&mut h).apply(Action::OpenSettings(settings_page::Section::Sources));
+    h.run_steps(2);
+    h.check_accessibility();
+    h.get_by_label("Best quality").click();
+    h.run_steps(2);
+    assert_eq!(app_mut(&mut h).prefs_now().prefer_copy, crate::settings::PreferCopy::BestQuality);
+
+    let lead = accounts::ItemKey::new(crate::test_tracks::account(), album_id(0)).to_string();
+    let folder = accounts::ItemKey::new(local_account(), album_id(0)).to_string();
+    let albums = app_mut(&mut h).data.albums.len();
+    let more = |h: &mut Harness<'_, Option<OndApp>>| {
+        reset(h, FULL, Route::Album(lead.clone()));
+        h.get_by_role_and_label(egui::accesskit::Role::Button, "More").click();
+        h.run_steps(2);
+    };
+    // The choice is saved in the background; frames drawn here don't read
+    // the answer, so it's taken from the inbox.
+    let settle = |h: &mut Harness<'_, Option<OndApp>>, n: usize| {
+        let deadline = testkit::Deadline::new();
+        let app = app_mut(h);
+        while app.data.albums.len() != n {
+            assert!(!deadline.passed(), "the albums never became {n}");
+            if let Ok(msg) = app.inbox.recv_timeout(std::time::Duration::from_millis(10)) {
+                app.handle(msg);
+            }
+        }
+        h.run_steps(2);
+    };
+    more(&mut h);
+    assert!(h.query_by_label("Combine again").is_none(), "nothing to combine again yet");
+    h.check_accessibility();
+    h.get_by_label("Keep apart").click();
+    h.run_steps(2);
+    settle(&mut h, albums + 1);
+    let text = "Kept the copies of Sunday at the Village Vanguard apart";
+    assert_eq!(app_mut(&mut h).ui.toasts.button(text), Some("Undo"), "{:?}", app_mut(&mut h).ui.toasts.texts());
+    h.get_by_label("Undo").click();
+    h.run_steps(2);
+    settle(&mut h, albums);
+
+    more(&mut h);
+    h.get_by_label("Keep apart").click();
+    h.run_steps(2);
+    settle(&mut h, albums + 1);
+    for id in [&lead, &folder] {
+        reset(&mut h, FULL, Route::Album(id.clone()));
+        h.get_by_role_and_label(egui::accesskit::Role::Button, "More").click();
+        h.run_steps(2);
+        assert!(h.query_by_label("Keep apart").is_none(), "a copy on its own has nothing to keep apart");
+        h.get_by_label("Combine again");
+    }
+    h.get_by_label("Combine again").click();
+    h.run_steps(2);
+    settle(&mut h, albums);
+    *h.state_mut() = None;
+}
+
+/// The mixed-playlist offer says which source can't hold whose songs, and
+/// closing it without an answer declines it, so nothing is left waiting.
+#[test]
+fn closing_the_mixed_playlist_offer_declines_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = full_window(dir.path());
+    reset(&mut h, FULL, Route::Playlists);
+    two_sources(app_mut(&mut h));
+    let (server, local) = (crate::test_tracks::account(), local_account());
+    {
+        let app = app_mut(&mut h);
+        app.multi.pending_playlist = Some(all_sources::PendingMixedPlaylist {
+            source: accounts::ItemKey::new(server, "pl-1"),
+            name: "Car".into(),
+            entries: vec![accounts::ItemKey::new(server, "vg-0"), accounts::ItemKey::new(local, "kb-0")],
+        });
+        app.ui.overlay = Some(Overlay::MixedPlaylist);
+    }
+    h.run_steps(2);
+    h.check_accessibility();
+    h.get_by_label_contains("Home server can't hold songs from Music folder.");
+    h.key_press(egui::Key::Escape);
+    h.run_steps(3);
+    let app = app_mut(&mut h);
+    assert!(app.ui.overlay.is_none() && app.multi.pending_playlist.is_none());
+    *h.state_mut() = None;
 }

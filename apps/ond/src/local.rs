@@ -3,6 +3,7 @@
 //! shows.
 
 use crate::favorites::SavedStarred;
+use crate::source::{TrackKey, stream_name};
 use library::{Album, Artist, Track};
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -11,23 +12,25 @@ use streamcache::{CacheKey, CacheKeyRef, StreamCache};
 
 /// `track`'s file in the stream cache, if it was streamed whole: the
 /// original, else as `transcode` converts it.
-pub fn cached(cache: &StreamCache, transcode: Option<&audio::Transcode>, track: &Track) -> Option<PathBuf> {
+pub fn cached(cache: &StreamCache, transcode: Option<&audio::Transcode>, key: &TrackKey, track: &Track) -> Option<PathBuf> {
     cache
-        .complete_path(&CacheKey::original(track.id.clone(), track.suffix.clone()))
-        .or_else(|| transcode.and_then(|t| cache.complete_path(&CacheKey::transcode(&track.id, &t.format, t.kbps))))
+        .complete_path(&CacheKey::original(stream_name(key).into_owned(), track.suffix.clone()))
+        .or_else(|| transcode.and_then(|t| cache.complete_path(&CacheKey::transcode(&stream_name(key), &t.format, t.kbps))))
 }
 
 /// Whether [`cached`] would find a file, without building its path: the
 /// answer views want for every visible row.
-pub fn is_cached(cache: &StreamCache, transcode: Option<&audio::Transcode>, track: &Track) -> bool {
-    cache.is_complete(CacheKeyRef::Original { id: &track.id, suffix: track.suffix.as_deref() })
-        || transcode.is_some_and(|t| cache.is_complete(CacheKeyRef::Transcode { id: &track.id, format: &t.format, kbps: t.kbps }))
+pub fn is_cached(cache: &StreamCache, transcode: Option<&audio::Transcode>, key: &TrackKey, track: &Track) -> bool {
+    cache.is_complete(CacheKeyRef::Original { id: &stream_name(key), suffix: track.suffix.as_deref() })
+        || transcode.is_some_and(|t| cache.is_complete(CacheKeyRef::Transcode { id: &stream_name(key), format: &t.format, kbps: t.kbps }))
 }
 
 /// What can play without the server: downloaded, or streamed whole and
 /// still cached.
 #[derive(Clone)]
 pub struct Playable {
+    pub account: Option<accounts::AccountId>,
+    pub downloads_account: Option<accounts::AccountId>,
     pub downloads: Arc<offline::Snapshot>,
     pub cache: StreamCache,
     pub transcode: Option<audio::Transcode>,
@@ -35,7 +38,10 @@ pub struct Playable {
 
 impl Playable {
     pub fn track(&self, t: &Track) -> bool {
-        self.downloads.is_done(&t.id) || is_cached(&self.cache, self.transcode.as_ref(), t)
+        let Some(account) = self.account else { return false };
+        let key = TrackKey::new(account, t.id.clone());
+        crate::app::pins::OfflineTracks { account: self.downloads_account, snap: &self.downloads, store: None }.is_done(&key)
+            || is_cached(&self.cache, self.transcode.as_ref(), &key, t)
     }
 }
 
@@ -124,8 +130,15 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let rt = tokio::runtime::Runtime::new().unwrap();
         let cache = StreamCache::new(streamcache::CacheConfig::new(dir.path()), rt.handle().clone()).unwrap();
-        let downloads = offline::Snapshot { tracks: [("a1".to_owned(), offline::TrackState::Done { size: 1 })].into(), ..Default::default() };
-        let keep = Playable { downloads: Arc::new(downloads), cache, transcode: None };
+        let downloads =
+            offline::Snapshot { tracks: [(crate::test_tracks::key("a1").to_string(), offline::TrackState::Done { size: 1 })].into(), ..Default::default() };
+        let keep = Playable {
+            account: Some(crate::test_tracks::account()),
+            downloads_account: Some(crate::test_tracks::account()),
+            downloads: Arc::new(downloads),
+            cache,
+            transcode: None,
+        };
         let kept = Kept::new(
             &keep,
             vec![album("A", "x"), album("B", "y")],

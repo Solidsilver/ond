@@ -111,6 +111,12 @@ fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T> {
     Ok(postcard::from_bytes(bytes)?)
 }
 
+/// An album and its complete track list, replaced and stamped together.
+pub struct AlbumTracks {
+    pub album: Album,
+    pub tracks: Vec<Track>,
+}
+
 pub struct Library {
     db: Database,
 }
@@ -308,17 +314,11 @@ impl Library {
         Ok(cleared)
     }
 
-    /// Replaces the whole artist list with what the server returned. Returns
+    /// Replaces the whole artist list with the supplied rows. Returns
     /// whether anything changed. Every sync sends the full list and it rarely
     /// differs, so an identical list writes nothing.
-    pub fn replace_artists(&self, artists: impl IntoIterator<Item = subsonic::Artist>) -> Result<bool> {
-        let artists: Vec<(Artist, Vec<u8>)> = artists
-            .into_iter()
-            .map(|a| {
-                let a = Artist::from(a);
-                encode(&a).map(|bytes| (a, bytes))
-            })
-            .collect::<Result<_>>()?;
+    pub fn replace_artists(&self, artists: impl IntoIterator<Item = Artist>) -> Result<bool> {
+        let artists: Vec<(Artist, Vec<u8>)> = artists.into_iter().map(|a| encode(&a).map(|bytes| (a, bytes))).collect::<Result<_>>()?;
         let wt = self.db.begin_write()?;
         let unchanged = {
             let rows = wt.open_table(ARTISTS)?;
@@ -350,13 +350,12 @@ impl Library {
     }
 
     #[cfg(test)]
-    pub fn upsert_artists(&self, artists: impl IntoIterator<Item = subsonic::Artist>) -> Result<()> {
+    pub fn upsert_artists(&self, artists: impl IntoIterator<Item = Artist>) -> Result<()> {
         let wt = self.db.begin_write()?;
         {
             let mut rows = wt.open_table(ARTISTS)?;
             let mut idx = wt.open_table(ARTISTS_BY_NAME)?;
             for a in artists {
-                let a = Artist::from(a);
                 if let Some(old) = rows.insert(a.id.as_str(), encode(&a)?.as_slice())? {
                     let old: Artist = decode(old.value())?;
                     idx.remove((old.sort_name().as_str(), old.id.as_str()))?;
@@ -367,27 +366,27 @@ impl Library {
         Ok(wt.commit()?)
     }
 
-    pub fn upsert_albums(&self, albums: impl IntoIterator<Item = subsonic::Album>) -> Result<()> {
+    pub fn upsert_albums(&self, albums: impl IntoIterator<Item = Album>) -> Result<()> {
         let wt = self.db.begin_write()?;
         {
             let mut rows = wt.open_table(ALBUMS)?;
             let mut idx = wt.open_table(ALBUMS_BY_SORT)?;
             for a in albums {
-                put_album(&mut rows, &mut idx, &Album::from(a))?;
+                put_album(&mut rows, &mut idx, &a)?;
             }
         }
         Ok(wt.commit()?)
     }
 
-    /// Replaces an album's track list with what the server returned, and
+    /// Replaces an album's track list with the supplied rows, and
     /// stamps it as current.
-    pub fn upsert_album_tracks(&self, album: subsonic::AlbumWithSongs) -> Result<()> {
+    pub fn upsert_album_tracks(&self, album: AlbumTracks) -> Result<()> {
         self.upsert_albums_tracks(vec![album])
     }
 
     /// [`upsert_album_tracks`](Self::upsert_album_tracks) for several albums in
     /// one transaction.
-    pub fn upsert_albums_tracks(&self, albums: Vec<subsonic::AlbumWithSongs>) -> Result<()> {
+    pub fn upsert_albums_tracks(&self, albums: Vec<AlbumTracks>) -> Result<()> {
         let wt = self.db.begin_write()?;
         {
             let mut tt = TrackTables::open(&wt)?;
@@ -395,29 +394,26 @@ impl Library {
             let mut idx = wt.open_table(ALBUMS_BY_SORT)?;
             let mut stamps = wt.open_table(ALBUM_STAMPS)?;
             for album in albums {
-                let album_id = album.album.id.clone();
-                tt.remove_album(&album_id)?;
-                for s in album.song {
-                    tt.put(&Track::from_song(s, &album_id))?;
+                tt.remove_album(&album.album.id)?;
+                for track in album.tracks {
+                    tt.put(&track)?;
                 }
-                let row = Album::from(album.album);
-                stamps.insert(album_id.as_str(), row.sync_stamp())?;
-                put_album(&mut rows, &mut idx, &row)?;
+                stamps.insert(album.album.id.as_str(), album.album.sync_stamp())?;
+                put_album(&mut rows, &mut idx, &album.album)?;
             }
         }
         Ok(wt.commit()?)
     }
 
-    /// Stores songs as they come, e.g. pages of a bulk `search3` export.
+    /// Stores tracks as they come, e.g. pages of a bulk export.
     /// Unlike [`upsert_album_tracks`](Self::upsert_album_tracks) this never
     /// removes anything, and stamps nothing: a page holds parts of albums.
-    pub fn store_songs(&self, songs: Vec<subsonic::Song>) -> Result<()> {
+    pub fn store_tracks(&self, tracks: Vec<Track>) -> Result<()> {
         let wt = self.db.begin_write()?;
         {
             let mut tt = TrackTables::open(&wt)?;
-            for s in songs {
-                let Some(album_id) = s.album_id.clone() else { continue };
-                tt.put(&Track::from_song(s, &album_id))?;
+            for track in tracks {
+                tt.put(&track)?;
             }
         }
         Ok(wt.commit()?)
@@ -590,6 +586,13 @@ impl Library {
         let rt = self.db.begin_read()?;
         let rows = rt.open_table(TRACKS)?;
         track_ids(&rt, album_id)?.iter().filter_map(|id| get_row_or_skip(&rows, id).transpose()).collect()
+    }
+
+    /// Looks up tracks by id in the given order, skipping any missing row.
+    pub fn tracks(&self, ids: &[String]) -> Result<Vec<Track>> {
+        let rt = self.db.begin_read()?;
+        let rows = rt.open_table(TRACKS)?;
+        ids.iter().filter_map(|id| get_row_or_skip(&rows, id).transpose()).collect()
     }
 
     /// All artists by folded sort name: the order of `ARTISTS_BY_NAME`,

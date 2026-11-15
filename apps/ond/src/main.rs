@@ -10,6 +10,7 @@ mod analyze;
 mod app;
 mod art;
 mod bridge;
+mod convert;
 mod failure;
 mod favorites;
 mod fmt;
@@ -32,6 +33,9 @@ mod prefs;
 mod queue;
 mod search;
 mod settings;
+mod source;
+mod storage;
+mod store;
 mod sync;
 #[cfg(test)]
 mod test_tracks;

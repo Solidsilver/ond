@@ -3,8 +3,8 @@
 use super::RedeApp;
 use crate::bridge::OfflineMsg;
 use crate::failure::Failure;
+use accounts::ItemKey;
 use offline::Pin;
-use sources::ItemKey;
 
 impl RedeApp {
     pub(super) fn download_book(&mut self, key: ItemKey) {

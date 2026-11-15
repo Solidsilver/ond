@@ -10,7 +10,8 @@ use super::{Action, RedeApp};
 use crate::bridge::BookmarkMsg;
 use crate::failure::Failure;
 use crate::listening::{Reconciled, Request};
-use sources::{Bookmark, ItemKey, Position, ProgressUpdate};
+use accounts::ItemKey;
+use sources::{Bookmark, Position, ProgressUpdate};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 

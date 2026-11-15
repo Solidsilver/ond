@@ -2,8 +2,9 @@
 //! The store wakes the bridge only when its snapshot changes; views read the
 //! retained snapshot without starting timers or touching the disk.
 
+use accounts::ItemKey;
 use offline::{OfflineStore, Pin, Snapshot, TrackRef};
-use sources::{Item, ItemKey, SessionTrack, TrackFile};
+use sources::{Item, SessionTrack, TrackFile};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 

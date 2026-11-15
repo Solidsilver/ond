@@ -2,6 +2,8 @@
 //! visualizers and managed settings, each shot to a PNG.
 
 use super::*;
+use crate::app::onboarding::Onboard;
+use shell::kit::OnboardingStep;
 
 fn scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
     // The Player: artwork, transport and the queue; lyrics in a drawer that
@@ -410,7 +412,7 @@ fn scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
     // The sidebar footer: server status (click for details), shortcuts, settings.
     reset(h, FULL, Route::Recent);
     let sidebar = egui::Rect::from_min_max(pos2(0.0, 600.0), pos2(216.0, 900.0));
-    if !click_label(h, "Connected to", sidebar) {
+    if !click_label(h, "music.example.com", sidebar) {
         panic!("(server status not found by label)");
     }
     h.run_steps(3);
@@ -474,8 +476,8 @@ fn scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
     {
         let app = app_mut(h);
         app.prefs.edit(|s| s.diagnostics_bar = true);
-        app.sync.tracks = true;
-        app.sync.progress = Some(crate::sync::Progress { done: 412, total: 1866, unit: crate::sync::Unit::Tracks });
+        app.session.sync.tracks = true;
+        app.session.sync.progress = Some(crate::sync::Progress { done: 412, total: 1866, unit: crate::sync::Unit::Tracks });
         app.diagnostics.note_frame(Duration::from_micros(1800));
     }
     h.run_steps(2);
@@ -549,6 +551,59 @@ fn scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
         app_mut(h).actions.push(Action::OpenSettings(section));
         s.shoot(h, &format!("settings-{}", section.label().to_lowercase()));
     }
+    // The one server as a source: unreachable, then its menu open.
+    reset(h, FULL, Route::Recent);
+    app_mut(h).session.online = false;
+    app_mut(h).session.unreachable = true;
+    app_mut(h).actions.push(Action::OpenSettings(settings_page::Section::Sources));
+    s.shoot(h, "settings-sources-offline");
+    reset(h, FULL, Route::Recent);
+    app_mut(h).actions.push(Action::OpenSettings(settings_page::Section::Sources));
+    h.run_steps(2);
+    h.get_by_label_contains("music.example.com, Navidrome, ").click();
+    h.run_steps(2);
+    h.event(egui::Event::PointerGone);
+    s.shoot(h, "settings-sources-menu");
+    egui::Popup::close_all(&h.ctx);
+
+    // A folder of music in use, the server kept behind it: scanning, with
+    // files it couldn't read, and with one of its folders unplugged.
+    let progress = crate::sync::Progress { done: 1_284, total: 3_960, unit: crate::sync::Unit::Tracks };
+    for (scene, setup) in [
+        ("settings-sources-local-scanning", (Some(progress), 0, false)),
+        ("settings-sources-local-skipped", (None, 3, false)),
+        ("settings-sources-local-missing", (None, 0, true)),
+    ] {
+        reset(h, FULL, Route::Recent);
+        let app = app_mut(h);
+        use_folder(app);
+        let (scan, skipped, missing) = setup;
+        app.session.sync.progress = scan;
+        app.session.sync.tracks = scan.is_some();
+        app.session.skipped = skipped;
+        if missing {
+            app.session.folder_missing = vec![PathBuf::from("/Volumes/Archive/Lossless")];
+        }
+        app.actions.push(Action::OpenSettings(settings_page::Section::Sources));
+        s.shoot(h, scene);
+    }
+    // The library from a folder: hearts, ratings and playlists via Ond's store,
+    // no downloads, the folder in the sidebar's foot, an album page, its menu,
+    // and an Ond playlist.
+    reset(h, FULL, Route::Albums);
+    use_folder(app_mut(h));
+    s.shoot(h, "local-albums");
+    reset(h, FULL, Route::Album(album_id(0)));
+    use_folder(app_mut(h));
+    s.shoot(h, "local-album");
+    h.get_by_role_and_label(egui::accesskit::Role::Button, "Music").click();
+    h.run_steps(2);
+    s.shoot(h, "local-footer-menu");
+    egui::Popup::close_all(&h.ctx);
+    reset(h, FULL, Route::Playlist { id: "pl-0".into(), name: "Late night, low volume".into() });
+    use_folder(app_mut(h));
+    s.shoot(h, "local-playlist");
+    use_server(app_mut(h));
 
     // A queue set up by hand: no preset matches, so Custom shows.
     reset(h, FULL, Route::Recent);
@@ -613,9 +668,9 @@ fn scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
     s.shoot(h, "songs");
 
     reset(h, FULL, Route::Songs);
-    let all = std::mem::take(&mut app_mut(h).data.tracks.all);
+    let all = std::mem::take(&mut Arc::make_mut(&mut app_mut(h).data.tracks).all);
     s.shoot(h, "songs-empty");
-    app_mut(h).data.tracks.all = all;
+    Arc::make_mut(&mut app_mut(h).data.tracks).all = all;
 
     reset(h, FULL, Route::Offline);
     s.shoot(h, "offline-pins");
@@ -794,19 +849,19 @@ fn scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
     reset(h, FULL, Route::Recent);
     {
         let app = app_mut(h);
-        app.sync.tracks = true;
-        app.sync.progress = Some(crate::sync::Progress { done: 412, total: 1866, unit: crate::sync::Unit::Tracks });
+        app.session.sync.tracks = true;
+        app.session.sync.progress = Some(crate::sync::Progress { done: 412, total: 1866, unit: crate::sync::Unit::Tracks });
     }
     s.shoot(h, "sidebar-syncing");
     let side = egui::Rect::from_min_max(pos2(0.0, 700.0), pos2(216.0, 900.0));
-    if !hover_label(h, "Syncing tracks", side) {
+    if !hover_label(h, "Syncing ·", side) {
         panic!("(sync status not found by label)");
     }
     h.run_steps(30);
     s.shoot(h, "sidebar-syncing-hover");
 
     reset(h, FULL, Route::Recent);
-    app_mut(h).sync.albums = true;
+    app_mut(h).session.sync.albums = true;
     s.shoot(h, "sidebar-syncing-albums");
 
     reset(h, FULL, Route::Recent);
@@ -817,8 +872,8 @@ fn scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
     reset(h, vec2(760.0, 640.0), Route::Albums);
     {
         let app = app_mut(h);
-        app.sync.tracks = true;
-        app.sync.progress = Some(crate::sync::Progress { done: 1200, total: 1866, unit: crate::sync::Unit::Tracks });
+        app.session.sync.tracks = true;
+        app.session.sync.progress = Some(crate::sync::Progress { done: 1200, total: 1866, unit: crate::sync::Unit::Tracks });
     }
     s.shoot(h, "narrow-rail-syncing");
 
@@ -860,9 +915,30 @@ fn scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
     }
     s.shoot(h, "player-verified");
 
+    // The first run: the sheet's tiles, then Navidrome's form.
     reset(h, FULL, Route::Recent);
     app_mut(h).login = Some(LoginForm { server: "http://localhost:4533".into(), ..Default::default() });
+    app_mut(h).onboarding = Some(Onboard::default());
     s.shoot(h, "login");
+
+    reset(h, FULL, Route::Recent);
+    app_mut(h).login = Some(LoginForm { server: "http://localhost:4533".into(), ..Default::default() });
+    app_mut(h).onboarding = Some(Onboard { step: OnboardingStep::Form(0), ..Default::default() });
+    s.shoot(h, "login-form");
+
+    // A folder of music's form: empty, with two folders, and scanning.
+    let two = || vec![PathBuf::from("/Users/demo/Music"), PathBuf::from("/Volumes/Archive/Lossless")];
+    for (scene, folders, busy) in [("login-folder-empty", Vec::new(), false), ("login-folder-two", two(), false), ("login-folder-scanning", two(), true)] {
+        reset(h, FULL, Route::Recent);
+        let app = app_mut(h);
+        app.login = Some(LoginForm { server: "http://localhost:4533".into(), ..Default::default() });
+        let form = crate::app::sources::FolderForm { folders, busy, ..Default::default() };
+        app.onboarding = Some(Onboard { step: OnboardingStep::Form(crate::app::onboarding::FOLDER), folders: form, ..Default::default() });
+        if busy {
+            app.session.sync.progress = Some(crate::sync::Progress { done: 1_284, total: 3_960, unit: crate::sync::Unit::Tracks });
+        }
+        s.shoot(h, scene);
+    }
 
     reset(h, FULL, Route::Recent);
     app_mut(h).login = Some(LoginForm {
@@ -871,11 +947,24 @@ fn scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
         error: Some(crate::bridge::connect_error(&subsonic::Error::Api { code: 40, message: "Wrong username or password".into() })),
         ..Default::default()
     });
+    app_mut(h).onboarding = Some(Onboard { step: OnboardingStep::Form(0), ..Default::default() });
     s.shoot(h, "login-error");
 
     reset(h, FULL, Route::Recent);
     app_mut(h).login = Some(LoginForm { server: "https://music.example.com".into(), username: "demo".into(), busy: true, ..Default::default() });
+    app_mut(h).onboarding = Some(Onboard { step: OnboardingStep::Form(0), ..Default::default() });
     s.shoot(h, "login-busy");
+
+    // Signing in again over the library: the form alone.
+    reset(h, FULL, Route::Recent);
+    app_mut(h).login = Some(LoginForm {
+        server: "https://music.example.com".into(),
+        username: "demo".into(),
+        error: Some("Wrong username or password.".into()),
+        closable: true,
+        ..Default::default()
+    });
+    s.shoot(h, "login-again");
 
     // Zoomed. Sizes are in points, so a 1440×900 window at 150% is 960×600
     // of them; the narrowest full window is its minimum, 900×560 points at
@@ -917,6 +1006,8 @@ fn scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
     app_mut(h).edit_windows(|w| w.mode = WindowMode::Player);
     s.shoot(h, "zoom-150-player-min");
     reset(h, FULL, Route::Recent);
+    reset(h, FULL, Route::Playlists);
+    s.shoot(h, "playlists");
 }
 
 /// The appearance settings, each on its own: colors from the album art, the
@@ -967,7 +1058,7 @@ fn appearance_scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
     // The next cover arrives: two steps (half a second) into the fade.
     {
         let app = app_mut(h);
-        app.player.queue.play_now(vanguard(), 3, Source::Album { id: album_id(0), name: ALBUMS[0].0.into() });
+        app.player.queue.play_now(crate::test_tracks::account(), vanguard(), 3, Source::Album { id: album_id(0), name: ALBUMS[0].0.into() });
         let deadline = testkit::Deadline::new();
         while app.art.look(&album_id(0)).is_none() {
             assert!(!deadline.passed(), "the next cover's look never arrived");
@@ -1062,6 +1153,288 @@ fn snapshots() {
     shoot_scenes(&[(egui::Theme::Light, "light"), (egui::Theme::Dark, "dark")], None, scenes);
 }
 
+/// A server and a music folder live together, in All sources: dots on
+/// covers and rows, the filter chips, the switcher and its menu, a merged
+/// artist, the mixed-playlist offer, and one source unreachable.
+#[test]
+#[ignore = "renders PNGs for review; run with --ignored"]
+fn sources_snapshots() {
+    shoot_scenes(&[(egui::Theme::Light, "light"), (egui::Theme::Dark, "dark")], None, source_scenes);
+}
+
+fn source_scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
+    reset(h, FULL, Route::Albums);
+    two_sources(app_mut(h));
+    reset(h, FULL, Route::Albums);
+    s.shoot(h, "sources-albums");
+
+    reset(h, FULL, Route::Albums);
+    app_mut(h).prefs.edit(|p| p.album_view = crate::settings::ViewMode::List);
+    s.shoot(h, "sources-albums-list");
+
+    reset(h, FULL, Route::Songs);
+    s.shoot(h, "sources-songs");
+
+    // The folder's chip lit: only its albums, and no dots, since they all
+    // come from one source.
+    reset(h, FULL, Route::Albums);
+    app_mut(h).actions.push(Action::Prefs(PrefsAction::Scope(all_sources::ScopeAction::Chip(shell::kit::SourceChip::Toggle(local_account())))));
+    s.shoot(h, "sources-chips-narrowed");
+    app_mut(h).actions.push(Action::Prefs(PrefsAction::Scope(all_sources::ScopeAction::Chip(shell::kit::SourceChip::All))));
+    h.run_steps(2);
+
+    reset(h, FULL, Route::Albums);
+    h.get_by_role_and_label(egui::accesskit::Role::Button, "All sources, 2 sources").click();
+    h.run_steps(2);
+    h.event(egui::Event::PointerGone);
+    s.shoot(h, "sources-switcher-menu");
+    egui::Popup::close_all(&h.ctx);
+
+    reset(h, FULL, Route::Artist { name: "Bill Evans Trio".into(), id: None });
+    s.shoot(h, "sources-artist");
+
+    let album = accounts::ItemKey::new(local_account(), album_id(1)).to_string();
+    reset(h, FULL, Route::Album(album));
+    s.shoot(h, "sources-album");
+
+    reset(h, FULL, Route::Albums);
+    // The chips' scope changes dropped the index; a real one rebuilds in the background.
+    app_mut(h).rebuild_search();
+    app_mut(h).actions.push(Action::OpenPalette);
+    h.run_steps(2);
+    {
+        let app = app_mut(h);
+        if let (Some(p), Some(index)) = (app.ui.palette.as_mut(), app.search.index.as_mut()) {
+            p.state.query = "bill".into();
+            p.refresh(index);
+        }
+    }
+    s.shoot(h, "sources-search");
+
+    reset(h, FULL, Route::Playlists);
+    {
+        let app = app_mut(h);
+        let (server, local) = (crate::test_tracks::account(), local_account());
+        app.multi.pending_playlist = Some(all_sources::PendingMixedPlaylist {
+            source: accounts::ItemKey::new(server, "pl-1"),
+            name: "Headphone test tracks".into(),
+            entries: vec![accounts::ItemKey::new(server, "vg-0"), accounts::ItemKey::new(local, "kb-0")],
+        });
+        app.ui.overlay = Some(Overlay::MixedPlaylist);
+    }
+    s.shoot(h, "sources-mixed-playlist");
+
+    // The server stops answering while the folder plays on.
+    let unreachable = |h: &mut Harness<'_, Option<OndApp>>| {
+        let server = app_mut(h).session.accounts.get_mut(&crate::test_tracks::account()).expect("server source");
+        server.online = false;
+        server.unreachable = true;
+    };
+    reset(h, FULL, Route::Albums);
+    unreachable(h);
+    h.run_steps(2);
+    h.get_by_role_and_label(egui::accesskit::Role::Button, "All sources, Home server · Offline").click();
+    h.run_steps(2);
+    h.event(egui::Event::PointerGone);
+    s.shoot(h, "sources-unreachable");
+    egui::Popup::close_all(&h.ctx);
+
+    reset(h, FULL, Route::Albums);
+    unreachable(h);
+    {
+        let folder = app_mut(h).session.accounts.get_mut(&local_account()).expect("folder source");
+        folder.skipped = 3;
+    }
+    app_mut(h).actions.push(Action::OpenSettings(settings_page::Section::Sources));
+    s.shoot(h, "sources-settings");
+
+    // The menu closed: the switcher flags the server it can't reach.
+    reset(h, FULL, Route::Albums);
+    unreachable(h);
+    h.run_steps(2);
+    s.shoot(h, "sources-unreachable-flag");
+    for source in app_mut(h).session.accounts.values_mut() {
+        source.online = true;
+        source.unreachable = false;
+        source.skipped = 0;
+    }
+
+    // The folded rail: the stacked dots alone.
+    reset(h, vec2(760.0, 700.0), Route::Albums);
+    s.shoot(h, "sources-rail");
+
+    // Three sources, the chips narrowed to two: the switcher names them,
+    // and its menu ticks their boxes.
+    let office: accounts::AccountId = "00000000-0000-4000-8000-0000000ff1ce".parse().unwrap();
+    {
+        let app = app_mut(h);
+        let mut entry = crate::settings::SourceEntry::subsonic(office, "https://office.example.com", "demo");
+        entry.name = Some("Office".into());
+        entry.color = accounts::SourceColor::new(4);
+        app.prefs.edit(|s| s.sources.push(entry.clone()));
+        let session = super::super::session::SourceSession {
+            online: true,
+            settings: Some(Settings { sources: vec![entry], ..Default::default() }),
+            ..Default::default()
+        };
+        app.session.accounts.insert(office, session);
+    }
+    reset(h, FULL, Route::Albums);
+    for account in [crate::test_tracks::account(), local_account()] {
+        app_mut(h).actions.push(Action::Scope(all_sources::ScopeAction::Chip(shell::kit::SourceChip::Toggle(account))));
+        h.run_steps(2);
+    }
+    // The sidebar's usual width has room for the count; a wider one, for
+    // the names.
+    s.shoot(h, "sources-narrowed-count");
+    reset(h, FULL, Route::Albums);
+    app_mut(h).prefs.edit(|p| p.sidebar_width = Some(300.0));
+    s.shoot(h, "sources-narrowed");
+    h.get_by_role_and_label(egui::accesskit::Role::Button, "Home server, Music folder, 2 of 3 sources").click();
+    h.run_steps(2);
+    h.event(egui::Event::PointerGone);
+    s.shoot(h, "sources-narrowed-menu");
+    egui::Popup::close_all(&h.ctx);
+    {
+        let app = app_mut(h);
+        app.actions.push(Action::Scope(all_sources::ScopeAction::All));
+        app.prefs.edit(|s| s.sources.retain(|e| e.id != office));
+        app.session.accounts.remove(&office);
+    }
+    h.run_steps(2);
+
+    // The queue holds songs from both: each row's dot follows its artist.
+    reset(h, FULL, Route::Songs);
+    for (i, item) in app_mut(h).player.queue.upcoming.iter_mut().enumerate() {
+        if i % 2 == 1 {
+            item.key.account = local_account();
+        }
+    }
+    s.shoot(h, "sources-queue");
+
+    // An Ond playlist holding songs from both carries both dots, on the
+    // Playlists page and in the sidebar, and its songs get a Source column.
+    {
+        let app = app_mut(h);
+        let tracks: Vec<library::Track> = app.data.tracks.all.iter().step_by(7).take(8).cloned().collect();
+        let playlist = crate::source::Playlist {
+            id: "ond:mixed".into(),
+            name: "Both at once".into(),
+            song_count: tracks.len() as u32,
+            duration: tracks.iter().filter_map(|t| t.duration_secs).sum(),
+            cover_art: None,
+            owner: None,
+        };
+        app.multi.ond_playlists.push(playlist);
+        app.multi.ond_tracks.insert("ond:mixed".into(), std::sync::Arc::new(tracks));
+        app.multi.projection = None;
+        app.project_sources();
+    }
+    reset(h, FULL, Route::Playlists);
+    s.shoot(h, "sources-playlists");
+    reset(h, FULL, Route::Playlist { id: "ond:mixed".into(), name: "Both at once".into() });
+    s.shoot(h, "sources-playlist");
+
+    // Mini: the playing song's dot after its artist.
+    reset(h, vec2(280.0, 280.0), Route::Recent);
+    app_mut(h).edit_windows(|w| w.mode = WindowMode::Mini);
+    h.hover_at(pos2(140.0, 140.0));
+    h.run_steps(6);
+    s.shoot(h, "sources-mini-hover");
+
+    // The Player: the same dot after the artist.
+    reset(h, vec2(380.0, 880.0), Route::Recent);
+    app_mut(h).edit_windows(|w| w.mode = WindowMode::Player);
+    s.shoot(h, "sources-player");
+
+    // Last, since nothing undoes it: matching albums combined. Each source
+    // holds a copy of one of the other's albums.
+    reset(h, FULL, Route::Albums);
+    combined_copies(app_mut(h));
+    app_mut(h).actions.push(Action::OpenSettings(settings_page::Section::Sources));
+    s.shoot(h, "sources-combined-setting");
+
+    // A dot for each source with a copy, after the artist. Newest first
+    // brings both combined albums to the top.
+    reset(h, FULL, Route::Albums);
+    app_mut(h).ui.sort = AlbumSort::Added;
+    s.shoot(h, "sources-combined-albums");
+    app_mut(h).ui.sort = AlbumSort::Artist;
+
+    // Every song from both copies, a dot for each copy a song has, and the
+    // copies' formats under the facts.
+    let vanguard = accounts::ItemKey::new(crate::test_tracks::account(), album_id(0)).to_string();
+    reset(h, FULL, Route::Album(vanguard.clone()));
+    s.shoot(h, "sources-combined-album");
+
+    // By album, last first: Sunday at the Village Vanguard (songs on both,
+    // one only on each), then Kind of Blue (one disc on both, the bonus
+    // disc only on the folder).
+    reset(h, FULL, Route::Songs);
+    app_mut(h).ui.songs.sort = super::super::songs::Column::Album;
+    app_mut(h).ui.songs.descending = true;
+    s.shoot(h, "sources-combined-songs");
+
+    // Bill Evans Trio's albums under each source's heading, the combined
+    // one once, under the server's, where its lead is.
+    reset(h, FULL, Route::Artist { name: "Bill Evans Trio".into(), id: None });
+    s.shoot(h, "sources-combined-artist");
+
+    reset(h, FULL, Route::Albums);
+    app_mut(h).actions.push(Action::OpenPalette);
+    h.run_steps(2);
+    {
+        let app = app_mut(h);
+        if let (Some(p), Some(index)) = (app.ui.palette.as_mut(), app.search.index.as_mut()) {
+            p.state.query = "gloria".into();
+            p.refresh(index);
+        }
+    }
+    s.shoot(h, "sources-combined-search");
+
+    // Only the folder's copies starred: the album's heart and the song's
+    // are lit all the same.
+    let folder = accounts::ItemKey::new(local_account(), album_id(0)).to_string();
+    {
+        let app = app_mut(h);
+        let song = app.multi.data[&local_account()].tracks.album(&folder).and_then(|songs| songs.first().cloned());
+        let starred = crate::favorites::Starred { songs: song.into_iter().collect(), albums: vec![folder.clone()], artists: Vec::new() };
+        app.favorites.load_source(local_account(), starred, Vec::new());
+        app.favorites.combine(&app.data, app.prefs_now().prefer_copy);
+    }
+    reset(h, FULL, Route::Album(vanguard.clone()));
+    s.shoot(h, "sources-combined-loved");
+
+    // Its menu offers Keep apart.
+    reset(h, FULL, Route::Album(vanguard.clone()));
+    h.run_steps(2);
+    h.get_by_role_and_label(egui::accesskit::Role::Button, "More").click();
+    s.shoot(h, "sources-combined-menu");
+
+    // Kept apart: the two copies side by side again, with the toast's Undo.
+    reset(h, FULL, Route::Albums);
+    app_mut(h).ui.sort = AlbumSort::Added;
+    {
+        let app = app_mut(h);
+        app.apply(Action::KeepApart(vanguard.clone()));
+        let deadline = testkit::Deadline::new();
+        while app.multi.apart_pairs.is_empty() {
+            assert!(!deadline.passed(), "the copies were never kept apart");
+            if let Ok(msg) = app.inbox.recv_timeout(std::time::Duration::from_millis(10)) {
+                app.handle(msg);
+            }
+        }
+    }
+    s.shoot(h, "sources-combined-apart");
+    app_mut(h).ui.sort = AlbumSort::Artist;
+
+    // Either copy's menu offers Combine again.
+    reset(h, FULL, Route::Album(folder));
+    h.run_steps(2);
+    h.get_by_role_and_label(egui::accesskit::Role::Button, "More").click();
+    s.shoot(h, "sources-combined-apart-menu");
+}
+
 /// Settings with some set in managed.json (as the Home Manager module writes
 /// it): their rows and the output picker locked, and the sign-in form.
 #[test]
@@ -1076,6 +1449,7 @@ fn managed_scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
         settings_page::Section::Playback,
         settings_page::Section::Output,
         settings_page::Section::Offline,
+        settings_page::Section::Sources,
         settings_page::Section::About,
     ] {
         reset(h, FULL, Route::Recent);
@@ -1089,8 +1463,10 @@ fn managed_scenes(h: &mut Harness<'_, Option<OndApp>>, s: &Shooter) {
     egui::Popup::close_all(&h.ctx);
     reset(h, FULL, Route::Recent);
     app_mut(h).login = Some(super::session::LoginForm { server: "https://music.example.com".into(), username: "demo".into(), ..Default::default() });
+    app_mut(h).onboarding = Some(Onboard { step: OnboardingStep::Form(0), ..Default::default() });
     s.shoot(h, "managed-sign-in");
     app_mut(h).login = None;
+    app_mut(h).onboarding = None;
 }
 
 /// Zooms to `percent` as the keys do, without the toast.

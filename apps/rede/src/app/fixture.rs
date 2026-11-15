@@ -8,7 +8,8 @@
 
 use super::*;
 use crate::settings::{Account, Paths};
-use sources::{Changes, Chapter, Item, ItemKey, ItemSummary, Library, LibraryKind, Series, Stamp, TrackFile};
+use accounts::ItemKey;
+use sources::{Changes, Chapter, Item, ItemSummary, Library, LibraryKind, Series, Stamp, TrackFile};
 use std::path::Path;
 
 /// The account the fixture is signed in to. Nothing talks to it.
@@ -26,7 +27,7 @@ pub fn wall_clock() -> chrono::NaiveDateTime {
 
 pub fn account() -> Account {
     let mut account = Account::new(SERVER, "sam");
-    account.id = sources::AccountId::from_uuid(uuid::Uuid::from_u128(42));
+    account.id = accounts::AccountId::from_uuid(uuid::Uuid::from_u128(42));
     account.device_id = "fixture".into();
     account.libraries = vec![crate::settings::KnownLibrary { id: LIBRARY.into(), name: "Books".into() }];
     account.sign_in = Some(crate::settings::SignInMethod::Password);
@@ -192,6 +193,7 @@ pub fn app(ctx: &egui::Context, dir: &Path, books: usize) -> RedeApp {
     let mut app = RedeApp::build(ctx, paths(dir)).expect("the app builds");
     app.bridge.use_openid_store(crate::openid::TestStore::default());
     app.login = None;
+    app.onboarding = None;
     let shelf = shelf(dir);
     let all = summaries();
     let listed: Vec<ItemSummary> = all.iter().take(books).cloned().collect();
@@ -207,9 +209,13 @@ pub fn app(ctx: &egui::Context, dir: &Path, books: usize) -> RedeApp {
     });
     app.shown = PrefsView::read(&app.prefs);
     app.session = Session { account: Some(signed_in), source: None, shelf: Some(shelf.clone()), connecting: false };
-    app.handle(crate::bridge::LibraryMsg::Books(listed));
+    let session = app.bridge.session();
+    app.handle(crate::bridge::Msg::Library { session, event: crate::bridge::LibraryMsg::Books(listed) });
     for (n, book) in all.iter().enumerate().take(books) {
-        app.handle(crate::bridge::LibraryMsg::Book { key: ItemKey::new(account().id, book.id.clone()), item: Box::new(details(n)) });
+        app.handle(crate::bridge::Msg::Library {
+            session,
+            event: crate::bridge::LibraryMsg::Book { key: ItemKey::new(account().id, book.id.clone()), item: Box::new(details(n)) },
+        });
     }
     // Square, portrait and landscape art exercise the fit; the remaining
     // books keep their title placeholders, including a cover still loading.
@@ -234,11 +240,13 @@ pub fn app(ctx: &egui::Context, dir: &Path, books: usize) -> RedeApp {
     app
 }
 
-/// An app at its sign-in screen, with nothing saved.
+/// An app at its sign-in form, with nothing saved: the first-run sheet,
+/// with Audiobookshelf picked.
 pub fn signed_out(ctx: &egui::Context, dir: &Path) -> RedeApp {
     let mut app = RedeApp::build(ctx, paths(dir)).expect("the app builds");
     app.bridge.use_openid_store(crate::openid::TestStore::default());
     app.login = Some(LoginForm::default());
+    app.onboarding = Some(shell::kit::OnboardingStep::Form(0));
     app.session = Session::default();
     app
 }
@@ -253,7 +261,7 @@ pub fn book_route(n: usize) -> Route {
 pub fn frame(ctx: &egui::Context, app: &mut RedeApp) {
     let input = egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(FULL[0], FULL[1]))), ..Default::default() };
     let mut out = ctx.run_ui(input, |ui| {
-        if app.login.is_some() {
+        if app.signing_in() {
             app.login_ui(ui);
         } else {
             app.main_ui(ui);
@@ -438,7 +446,7 @@ pub fn listened(app: &mut RedeApp) {
 /// Piranesi half listened to, and Dune finished.
 pub fn in_progress(app: &mut RedeApp) {
     let at = |id: &str, secs: f64, finished: bool| {
-        let item = sources::ItemKey::new(account().id, id);
+        let item = accounts::ItemKey::new(account().id, id);
         (id.to_owned(), sources::Progress { item, position: sources::Position::from_secs(secs), finished, at: Some(std::time::SystemTime::now()) })
     };
     for (id, progress) in [at("book-2", 7_980.0, false), at("book-1", 75_720.0, true)] {

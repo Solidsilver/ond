@@ -3,8 +3,9 @@
 //! persist and report listening. Fakes exercise the same control path.
 
 use crate::timeline::{Timeline, normalize_speed};
+use accounts::ItemKey;
 use audio::{Command, EngineHandle, Event, PlayState, TrackSource};
-use sources::{Item, ItemKey, PlaySession, Position, ProgressUpdate, SessionTrack};
+use sources::{Item, PlaySession, Position, ProgressUpdate, SessionTrack};
 use std::time::{Duration, Instant, SystemTime};
 
 pub trait Transport {
@@ -448,7 +449,7 @@ impl Player {
                     self.paused = true;
                 }
             }
-            Event::Error { track_id: Some(id), message } if book.files.iter().any(|f| f.id == *id) => {
+            Event::Error { track_id: Some(id), message, .. } if book.files.iter().any(|f| f.id == *id) => {
                 if message.contains("http 401") && !self.refreshed {
                     self.refreshed = true;
                     notes.push(Note::Refresh);

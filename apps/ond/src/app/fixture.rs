@@ -258,7 +258,7 @@ pub(super) fn play_white(app: &mut OndApp) {
     for t in &mut songs {
         t.cover_art = Some(WHITE.into());
     }
-    app.player.queue.play_now(songs, 1, Source::Album { id: album_id(13), name: ALBUMS[13].0.into() });
+    app.player.queue.play_now(crate::test_tracks::account(), songs, 1, Source::Album { id: album_id(13), name: ALBUMS[13].0.into() });
 }
 
 pub(super) fn devices() -> audio::Event {
@@ -340,8 +340,12 @@ pub(super) fn populated(ctx: &egui::Context, dir: &Path) -> OndApp {
         app.handle(m);
     }
     app.login = None;
+    app.onboarding = None;
+    app.session.settings =
+        Some(Settings { sources: vec![crate::settings::SourceEntry::subsonic(crate::test_tracks::account(), "", "")], ..Default::default() });
+    app.downloads.owner = Some(crate::test_tracks::account());
     app.session.server_label = "demo · navidrome 0.64.2".into();
-    app.sync.label = format!("{} albums", ALBUMS.len());
+    app.session.sync.label = format!("{} albums", ALBUMS.len());
 
     let albums: Vec<Album> = (0..ALBUMS.len()).map(album).collect();
     for i in 0..ALBUMS.len() {
@@ -351,23 +355,29 @@ pub(super) fn populated(ctx: &egui::Context, dir: &Path) -> OndApp {
     app.data.newest = albums.iter().map(|a| a.id.clone()).collect();
     app.data.set_albums(albums);
     app.rebuild_search();
-    app.data.tracks.set_album(&album_id(0), vanguard());
-    app.data.tracks.set_album(&album_id(1), kind_of_blue());
+    Arc::make_mut(&mut app.data.tracks).set_album(&album_id(0), vanguard());
+    Arc::make_mut(&mut app.data.tracks).set_album(&album_id(1), kind_of_blue());
     for i in [2, 20, 23] {
-        app.data.tracks.set_album(&album_id(i), filler(i, 9));
+        Arc::make_mut(&mut app.data.tracks).set_album(&album_id(i), filler(i, 9));
     }
     // The flat list the Songs view and search read (the per-album map stays as is).
     let mut all: Vec<Track> = app.data.tracks.by_album.values().flat_map(|s| s.iter()).cloned().collect();
     all.sort_by(|a, b| (&a.album_id, a.disc, a.track).cmp(&(&b.album_id, b.disc, b.track)));
-    app.data.tracks.all = Arc::new(all);
+    Arc::make_mut(&mut app.data.tracks).all = Arc::new(all);
     // A connected session: nothing is dimmed as "not downloaded".
     app.session.online = true;
-    app.session.settings = Some(Settings { server: "https://music.example.com".into(), username: "demo".into(), ..Default::default() });
+    let source = crate::settings::SourceEntry::subsonic(crate::test_tracks::account(), "https://music.example.com", "demo");
+    app.prefs.edit(|s| {
+        if s.sources.is_empty() {
+            s.sources.push(source.clone());
+        }
+    });
+    app.session.settings = Some(Settings { sources: vec![source], ..Default::default() });
     app.session.server_info = "navidrome 0.64.2".into();
     app.data.playlists = ["Late night, low volume", "Headphone test tracks", "Sunday records", "Bluegrass Saturday", "Car"]
         .iter()
         .enumerate()
-        .map(|(i, n)| subsonic::Playlist { id: format!("pl-{i}"), name: (*n).into(), song_count: 12, duration: 3000, cover_art: None, owner: None })
+        .map(|(i, n)| crate::source::Playlist { id: format!("pl-{i}"), name: (*n).into(), song_count: 12, duration: 3000, cover_art: None, owner: None })
         .collect();
     // A playlist mixing albums, for its page and mosaic.
     let mut mix = filler(20, 3);
@@ -432,14 +442,14 @@ pub(super) fn fill_queue(app: &mut OndApp) {
     let q = &mut app.player.queue;
     *q = crate::queue::Queue::default();
     let history = filler(2, 3);
-    q.play_now(history, 0, Source::Album { id: album_id(2), name: ALBUMS[2].0.into() });
+    q.play_now(crate::test_tracks::account(), history, 0, Source::Album { id: album_id(2), name: ALBUMS[2].0.into() });
     q.advance();
     q.advance();
-    q.play_now(vanguard(), 1, Source::Album { id: album_id(0), name: ALBUMS[0].0.into() });
-    q.play_next(vec![filler(23, 1).remove(0), kind_of_blue().remove(2)]);
+    q.play_now(crate::test_tracks::account(), vanguard(), 1, Source::Album { id: album_id(0), name: ALBUMS[0].0.into() });
+    q.play_next(crate::test_tracks::account(), vec![filler(23, 1).remove(0), kind_of_blue().remove(2)]);
     let playlist = Source::Playlist { id: "pl-0".into(), name: "Late night, low volume".into() };
     for (k, t) in filler(20, 9).into_iter().enumerate() {
-        q.upcoming.push(Item { uid: 10_000 + k as u64, track: t, source: playlist.clone(), next: false });
+        q.upcoming.push(Item { uid: 10_000 + k as u64, key: crate::test_tracks::key(&t.id), track: t, source: playlist.clone(), next: false });
     }
     app.engine.status.preview(PlayState::Playing, 141.0, 383.0, 0.72);
 }
@@ -467,10 +477,11 @@ pub(super) fn reset(h: &mut Harness<'_, Option<OndApp>>, size: Vec2, route: Rout
     app.ui.np_details = false;
     app.ui.lyrics_follow = crate::lyrics::Follow::default();
     app.login = None;
+    app.onboarding = None;
     app.session.online = true;
-    app.sync.albums = false;
-    app.sync.tracks = false;
-    app.sync.progress = None;
+    app.session.sync.albums = false;
+    app.session.sync.tracks = false;
+    app.session.sync.progress = None;
     // Back to 100%, unless managed.json holds it elsewhere.
     app.prefs.edit(|s| s.zoom = shell::zoom::DEFAULT);
     let zoom = app.prefs.get(|s| s.zoom);
@@ -580,7 +591,7 @@ pub(super) fn fixture_waveform(app: &mut OndApp) {
             (section * grain * 255.0).clamp(0.0, 255.0) as u8
         })
         .collect();
-    let id = item.track.id.clone();
+    let id = item.key.clone();
     app.waveforms.insert(id, analysis::Peaks { values });
 }
 
@@ -623,7 +634,7 @@ pub(super) fn steps_with_audio(h: &mut Harness<'_, Option<OndApp>>, n: usize) {
 
 /// Plays Kind of Blue instead (another cover than the fixture's).
 pub(super) fn play_blue(app: &mut OndApp) {
-    app.player.queue.play_now(kind_of_blue(), 2, Source::Album { id: album_id(1), name: ALBUMS[1].0.into() });
+    app.player.queue.play_now(crate::test_tracks::account(), kind_of_blue(), 2, Source::Album { id: album_id(1), name: ALBUMS[1].0.into() });
 }
 
 /// Hovers the first widget labelled `label` inside `area`, if any.
@@ -739,6 +750,7 @@ pub(super) fn long_info(app: &mut OndApp) -> Option<Item> {
     if let Some(cur) = app.player.queue.current.as_mut() {
         let t = &mut cur.track;
         t.id = "long-credits".into();
+        cur.key.item = t.id.clone();
         t.title = "Leaning on the Everlasting Arms (Live at the Old Dominican Chapel)".into();
         t.contributors = vec![
             person("composer", None, "Anthony Johnson Showalter"),
@@ -799,4 +811,146 @@ pub(super) fn wheel(h: &mut Harness<'_, Option<OndApp>>, at: Pos2, dy: f32, step
         h.run_steps(3);
     }
     h.run_steps(10);
+}
+
+/// The fixture's folder source's account.
+pub(super) fn local_account() -> accounts::AccountId {
+    "00000000-0000-4000-8000-00000000f01d".parse().unwrap()
+}
+
+/// Makes a folder of music the source in use, over the same library: two
+/// folders, the server kept in the list behind it. [`use_server`] puts the
+/// fixture's server back.
+pub(super) fn use_folder(app: &mut OndApp) {
+    let folders = vec![
+        crate::settings::FolderEntry::with_key("demo-music", "/Users/demo/Music"),
+        crate::settings::FolderEntry::with_key("demo-lossless", "/Volumes/Archive/Lossless"),
+    ];
+    let roots: Vec<scan::ScanRoot> = folders.iter().map(|f| scan::ScanRoot::new(f.key.clone(), f.path.clone())).collect();
+    let local = crate::settings::SourceEntry::local(local_account(), None, accounts::SourceColor::new(1), folders);
+    let server = crate::settings::SourceEntry::subsonic(crate::test_tracks::account(), "https://music.example.com", "demo");
+    app.prefs.edit(|s| s.sources = vec![local.clone(), server.clone()]);
+    app.session.settings = Some(Settings { sources: vec![local, server], ..Default::default() });
+    app.session.source = Some(Arc::new(crate::source::local::LocalSource::new(local_account(), roots, None)));
+    app.session.folder_missing.clear();
+    app.session.skipped = 0;
+    app.session.server_label = "Music".into();
+    app.session.server_info = "Local folders".into();
+}
+
+/// The fixture's server is the source in use again.
+pub(super) fn use_server(app: &mut OndApp) {
+    let server = crate::settings::SourceEntry::subsonic(crate::test_tracks::account(), "https://music.example.com", "demo");
+    app.prefs.edit(|s| s.sources = vec![server.clone()]);
+    app.session.settings = Some(Settings { sources: vec![server], ..Default::default() });
+    app.session.source = None;
+    app.session.folder_missing.clear();
+    app.session.skipped = 0;
+    app.session.server_label = "demo · navidrome 0.64.2".into();
+    app.session.server_info = "navidrome 0.64.2".into();
+}
+
+/// Splits the fixture's library between two live sources, the server and a
+/// music folder (every third album is the folder's, so Bill Evans Trio has
+/// albums on both), and shows them together in All sources. Item ids,
+/// covers and playlists take each source's qualified spelling, as a real
+/// merged library's do. Nothing undoes it: scenes after it are two-source.
+pub(super) fn two_sources(app: &mut OndApp) {
+    use crate::source::identity;
+    let (server, local) = (crate::test_tracks::account(), local_account());
+    let folders = vec![crate::settings::FolderEntry::with_key("demo-music", "/Users/demo/Music")];
+    let folder_entry = crate::settings::SourceEntry::local(local, Some("Music folder".into()), accounts::SourceColor::new(1), folders);
+    let mut server_entry = crate::settings::SourceEntry::subsonic(server, "https://music.example.com", "demo");
+    server_entry.name = Some("Home server".into());
+    app.prefs.edit(|s| {
+        s.sources = vec![server_entry.clone(), folder_entry.clone()];
+        s.scope = accounts::Scope::all();
+    });
+    let synced = chrono::TimeZone::with_ymd_and_hms(&chrono::Local, 2024, 1, 1, 9, 41, 0).unwrap();
+    let live = |entry: &crate::settings::SourceEntry, label: &str| super::session::SourceSession {
+        online: true,
+        settings: Some(Settings { sources: vec![entry.clone()], ..Default::default() }),
+        server_label: label.into(),
+        sync: super::SyncState { last: Some(synced), ..Default::default() },
+        ..Default::default()
+    };
+    app.session.accounts.insert(server, live(&server_entry, "demo · navidrome 0.64.2"));
+    app.session.accounts.insert(local, live(&folder_entry, "Local folders"));
+    app.session.focus = Some(server);
+    app.session.scope = accounts::Scope::all();
+
+    let owner = |i: usize| if i % 3 == 1 { local } else { server };
+    let mut by_source: std::collections::BTreeMap<accounts::AccountId, (Vec<Album>, Vec<Track>)> = Default::default();
+    for (i, mut a) in (0..ALBUMS.len()).map(album).enumerate() {
+        let account = owner(i);
+        app.art.preload(&accounts::ItemKey::new(account, album_id(i)).to_string(), cover(i));
+        identity::album(account, &mut a);
+        let mut tracks: Vec<Track> = app.data.tracks.album(&album_id(i)).map(|s| s.to_vec()).unwrap_or_default();
+        tracks.iter_mut().for_each(|t| identity::track(account, t));
+        let entry = by_source.entry(account).or_default();
+        entry.0.push(a);
+        entry.1.extend(tracks);
+    }
+    for (account, (albums, tracks)) in by_source {
+        let mut data = Data::default();
+        data.account = Some(account);
+        data.newest = albums.iter().map(|a| a.id.clone()).collect();
+        data.set_albums(albums);
+        data.set_tracks(crate::tracks::TrackSet::new(tracks));
+        if account == server {
+            data.playlists = app.data.playlists.clone();
+            data.playlists.iter_mut().for_each(|p| identity::playlist(account, p));
+        }
+        app.multi.data.insert(account, data);
+    }
+    // The first account's art took over the shared cache: the queue's bare
+    // covers go back in.
+    for i in 0..ALBUMS.len() {
+        app.art.preload(&album_id(i), cover(i));
+    }
+    app.art.preload(WHITE, white_cover());
+    app.multi.projection = None;
+    app.project_sources();
+    app.rebuild_search();
+}
+
+/// Over [`two_sources`], with Combine matching albums on: the folder also
+/// holds the server's Sunday at the Village Vanguard as MP3s, a song short
+/// and with a take the server lacks, and the server holds the first disc
+/// of the folder's Kind of Blue, so each is one album on both.
+pub(super) fn combined_copies(app: &mut OndApp) {
+    use crate::source::identity;
+    let (server, local) = (crate::test_tracks::account(), local_account());
+    let mp3 = |kbps: u32| {
+        move |mut t: Track| {
+            t.suffix = Some("mp3".into());
+            t.bit_rate_kbps = Some(kbps);
+            t.bit_depth = None;
+            t.sample_rate = Some(44_100);
+            t
+        }
+    };
+    let mut vanguard: Vec<Track> = vanguard().into_iter().filter(|t| t.track != Some(3)).map(mp3(320)).collect();
+    let take = track("vg-6".into(), 0, "Gloria's Step (Take 3)", "Bill Evans Trio", VANGUARD.len() as u32 + 1, 1, 361, Some("Scott LaFaro"), 0, 44_100);
+    vanguard.push(mp3(320)(take));
+    let blue: Vec<Track> = kind_of_blue().into_iter().filter(|t| t.disc == Some(1)).map(mp3(256)).collect();
+    for (account, i, mut tracks) in [(local, 0, vanguard), (server, 1, blue)] {
+        let mut a = album(i);
+        a.song_count = tracks.len() as u32;
+        a.duration_secs = tracks.iter().filter_map(|t| t.duration_secs).sum();
+        identity::album(account, &mut a);
+        app.art.preload(&a.id, cover(i));
+        tracks.iter_mut().for_each(|t| identity::track(account, t));
+        let data = app.multi.data.get_mut(&account).expect("a live source");
+        let mut albums = data.albums.to_vec();
+        albums.push(a);
+        data.set_albums(albums);
+        let mut all = data.tracks.all.to_vec();
+        all.extend(tracks);
+        data.set_tracks(crate::tracks::TrackSet::new(all));
+    }
+    app.prefs.edit(|s| s.combine_copies = true);
+    app.multi.projection = None;
+    app.project_sources();
+    app.rebuild_search();
 }

@@ -12,6 +12,40 @@ use egui::{FontId, Rect, Sense, Ui, pos2, vec2};
 use library::Track;
 
 impl ViewCtx<'_> {
+    pub(super) fn playlists_page(&mut self, ui: &mut Ui) {
+        shell::kit::page_heading(ui, "Playlists", None);
+        self.scope_chips(ui);
+        if self.data.playlists.is_empty() {
+            crate::widgets::empty_state(ui, Icon::List, "No playlists", "Make a playlist from any song's menu.");
+            return;
+        }
+        let mut scroll = egui::ScrollArea::vertical().id_salt("playlists");
+        if let Some(y) = super::alpha::take_jump(ui, "playlists") {
+            scroll = scroll.vertical_scroll_offset(y);
+        }
+        scroll.show(ui, |ui| {
+            for playlist in &self.data.playlists {
+                let dots = self.playlist_dots(playlist);
+                let clicked = if dots.is_empty() {
+                    ui.button(&playlist.name).clicked()
+                } else {
+                    // The sources it holds songs from follow its name.
+                    ui.horizontal(|ui| {
+                        let clicked = ui.button(&playlist.name).clicked();
+                        let w = shell::kit::source_dots_width(dots.len());
+                        let (r, _) = ui.allocate_exact_size(vec2(w, ui.spacing().interact_size.y), Sense::hover());
+                        shell::kit::source_dots(ui, r.center(), &dots, ui.visuals().panel_fill);
+                        clicked
+                    })
+                    .inner
+                };
+                if clicked {
+                    self.actions.push(Action::Go(crate::nav::Route::Playlist { id: playlist.id.clone(), name: playlist.name.clone() }));
+                }
+            }
+        });
+    }
+
     /// A playlist: a mosaic of its first albums' covers, name, length, Play /
     /// Shuffle / ⋯, then its tracks. The user's own playlists can be renamed,
     /// deleted, reordered by dragging (or ⌥↑/↓) and trimmed (⌫).
@@ -62,7 +96,7 @@ impl ViewCtx<'_> {
                     let more = icons::sized_button(ui, Icon::More, "More", vec2(30.0, 30.0), 13.0, Some(t.accent));
                     egui::Popup::menu(&more).show(|ui| {
                         let c = super::browse::Collection::Playlist(id.to_owned());
-                        super::browse::collection_menu(ui, &c, false, kept, Some("⇧⌘D"), self.actions);
+                        super::browse::collection_menu(ui, &c, false, self.session.caps().downloads.then_some(kept), Some("⇧⌘D"), self.actions);
                         if mine {
                             ui.separator();
                             self.playlist_edit_items(ui, id, name);
@@ -93,10 +127,13 @@ impl ViewCtx<'_> {
         });
     }
 
-    /// Rename… and Delete… for one of the user's playlists.
+    /// Rename…, Export M3U… (when Ond owns it), and Delete… for one of the user's playlists.
     pub(super) fn playlist_edit_items(&mut self, ui: &mut Ui, id: &str, name: &str) {
         if ui.button("Rename…").clicked() {
             self.actions.push(Action::Overlay(Overlay::Rename { id: id.to_owned(), name: name.to_owned() }));
+        }
+        if (id.starts_with("ond:") || !self.session.for_item(id).source_caps().playlists) && ui.button("Export M3U…").clicked() {
+            self.actions.push(Action::PlaylistEdit(super::PlaylistAction::ExportM3u { id: id.to_owned(), name: name.to_owned() }));
         }
         if ui.button("Delete…").clicked() {
             self.actions.push(Action::Overlay(Overlay::Delete { id: id.to_owned(), name: name.to_owned() }));
@@ -104,7 +141,7 @@ impl ViewCtx<'_> {
     }
 
     /// Playlists the user can change (others' public ones are read-only).
-    pub(super) fn owns(&self, p: &subsonic::Playlist) -> bool {
+    pub(super) fn owns(&self, p: &crate::source::Playlist) -> bool {
         super::sidebar::owns(self.session, p)
     }
 

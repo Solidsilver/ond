@@ -8,6 +8,7 @@ use super::offline_page::track_mark;
 use crate::icons::{self, Icon};
 use crate::theme::{Tokens, semibold};
 use crate::widgets::{elide, row_fill};
+use accounts::SourceColor;
 use egui::{Align2, Color32, FontId, Rect, Response, Sense, Ui, pos2, vec2};
 use library::Track;
 
@@ -93,6 +94,15 @@ impl TrackRow {
         crate::widgets::focus_ring(ui, &self.resp, self.rect.shrink(2.0), col::RADIUS - 2.0);
     }
 
+    /// What the row's inside looks like under [`fill`](Self::fill): what
+    /// stacked dots are cut out of.
+    pub fn ground(t: &Tokens, selected: bool, hovered: bool) -> Color32 {
+        match row_fill(t, selected, hovered) {
+            Color32::TRANSPARENT => t.bg,
+            fill => fill,
+        }
+    }
+
     /// The playing triangle at `x`; returns where the title starts after it.
     pub fn playing(&self, ui: &Ui, t: &Tokens, x: f32) -> f32 {
         icons::paint(ui.painter(), Rect::from_center_size(pos2(x + col::PLAYING / 2.0, self.cy()), vec2(col::PLAYING, col::PLAYING)), Icon::Play, t.accent);
@@ -110,11 +120,22 @@ impl TrackRow {
     /// A title over a second line (the artist), both cut to `width`, meeting
     /// at the row's middle.
     pub fn two_lines(&self, ui: &Ui, x: f32, width: f32, title: (&str, FontId, Color32), sub: (&str, FontId, Color32)) {
+        self.two_lines_from(ui, x, width, title, sub, &[]);
+    }
+
+    /// [`two_lines`](Self::two_lines), with the second followed by the dots
+    /// of the sources the song comes from (one, or one per copy), when
+    /// there are any to show.
+    pub fn two_lines_from(&self, ui: &Ui, x: f32, width: f32, title: (&str, FontId, Color32), sub: (&str, FontId, Color32), dots: &[SourceColor]) {
         let cy = self.cy();
         let g = elide(ui, title.0, title.1, title.2, width);
         ui.painter().galley(pos2(x, cy - g.size().y), g, title.2);
-        let g = elide(ui, sub.0, sub.1, sub.2, width);
-        ui.painter().galley(pos2(x, cy + 1.0), g, sub.2);
+        if dots.is_empty() {
+            let g = elide(ui, sub.0, sub.1, sub.2, width);
+            ui.painter().galley(pos2(x, cy + 1.0), g, sub.2);
+        } else {
+            shell::kit::text_then_dots(ui, pos2(x, cy + 1.0), sub, width, dots, ui.visuals().window_fill);
+        }
     }
 
     /// Text ending at `right`, centred on the row (the length).
