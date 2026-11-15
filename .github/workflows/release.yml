@@ -227,17 +227,26 @@ jobs:
           echo "notes=$notes" >> "$GITHUB_ENV"
 
       # A repository-wide previous release might belong to the other app.
-      # Creation order also keeps a stable Rede release after its beta tags.
+      # A beta's changelog runs from the tag before it, beta or not. A full
+      # release's runs from the full release before it, so it covers its
+      # betas too; only an app's first full release falls back to its betas.
       - name: Previous release
+        env:
+          PRERELEASE: ${{ needs.tag.outputs.prerelease }}
         run: |
           case "$APP" in
-            ond) pattern='^(ond-)?v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$' ;;
-            rede) pattern='^rede-v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$' ;;
+            ond) prefix='(ond-)?v' ;;
+            rede) prefix='rede-v' ;;
           esac
-          previous="$(
-            git tag --merged "$GITHUB_SHA" --sort=-creatordate -l | grep -E "$pattern" |
+          stable="^${prefix}[0-9]+\.[0-9]+\.[0-9]+$"
+          any="^${prefix}[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$"
+          before() {
+            git tag --merged "$GITHUB_SHA" --sort=-creatordate -l | grep -E "$1" |
               awk -v current="$GITHUB_REF_NAME" '$0 != current { print; exit }'
-          )"
+          }
+          previous=""
+          if [ "$PRERELEASE" != "true" ]; then previous="$(before "$stable")"; fi
+          if [ -z "$previous" ]; then previous="$(before "$any")"; fi
           echo "Previous $APP release: ${previous:-none}"
           echo "previous=$previous" >> "$GITHUB_ENV"
 
