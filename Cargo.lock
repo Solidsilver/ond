@@ -4626,6 +4626,7 @@ dependencies = [
  "egui",
  "egui_kittest",
  "image",
+ "libc",
  "minisign-verify",
  "nucleo-matcher",
  "objc2 0.6.5",

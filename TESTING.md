@@ -150,7 +150,9 @@ not claims that signed production updates have been installed successfully:
   teams, a different team, and ad-hoc signing. Only the matching team (or an
   ad-hoc running app) can reach Ready; every archive still requires minisign.
   Try an app opened from its dmg, a translocated path and an unwritable
-  `/Applications`: expect a typed fallback and no stage left behind.
+  `/Applications`: expect a typed fallback and no stage left behind. A bundle
+  on a writable external drive under `/Volumes` must reach Ready; one on a
+  read-only mounted image must report DiskImage.
 - [ ] On macOS, test both architectures and a cache on a different volume.
   Restart to Update and ordinary Quit must stop audible playback and release
   the device before the helper swaps the bundle. Restart must reopen it; plain

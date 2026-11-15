@@ -70,18 +70,24 @@ fn translocation_detection_uses_a_whole_path_component() {
 #[test]
 fn the_planner_selects_bundles_layouts_and_loose_binaries_or_a_typed_fallback() {
     let mac = Path::new("/Applications/Ond.app/Contents/MacOS/Ond");
-    assert_eq!(plan(Platform::Macos, mac, "ond", true, |_| false), Ok(Plan::MacBundle("/Applications/Ond.app".into())));
-    assert_eq!(plan(Platform::Macos, mac, "ond", false, |_| false), Err(Fallback::ReadOnly));
-    assert_eq!(plan(Platform::Macos, Path::new("/tmp/Ond"), "ond", true, |_| false), Err(Fallback::UnknownLayout));
-    assert_eq!(plan(Platform::Macos, Path::new("/Volumes/Ond/Ond.app/Contents/MacOS/Ond"), "ond", true, |_| false), Err(Fallback::DiskImage));
-    assert_eq!(plan(Platform::Macos, Path::new("/tmp/AppTranslocation/id/d/Ond.app/Contents/MacOS/Ond"), "ond", false, |_| false), Err(Fallback::Translocated));
+    assert_eq!(plan(Platform::Macos, mac, "ond", true, false, |_| false), Ok(Plan::MacBundle("/Applications/Ond.app".into())));
+    assert_eq!(plan(Platform::Macos, mac, "ond", false, false, |_| false), Err(Fallback::ReadOnly));
+    assert_eq!(plan(Platform::Macos, Path::new("/tmp/Ond"), "ond", true, false, |_| false), Err(Fallback::UnknownLayout));
+    assert_eq!(plan(Platform::Macos, Path::new("/Volumes/Ond/Ond.app/Contents/MacOS/Ond"), "ond", true, true, |_| false), Err(Fallback::DiskImage));
+    assert_eq!(
+        plan(Platform::Macos, Path::new("/tmp/AppTranslocation/id/d/Ond.app/Contents/MacOS/Ond"), "ond", false, false, |_| false),
+        Err(Fallback::Translocated)
+    );
     let linux = Path::new("/home/me/.local/bin/ond");
-    assert_eq!(plan(Platform::Linux, linux, "ond", true, |_| true), Ok(Plan::LinuxLayout { executable: linux.into(), prefix: "/home/me/.local".into() }));
-    assert_eq!(plan(Platform::Linux, linux, "ond", true, |_| false), Ok(Plan::Binary(linux.into())));
+    assert_eq!(
+        plan(Platform::Linux, linux, "ond", true, false, |_| true),
+        Ok(Plan::LinuxLayout { executable: linux.into(), prefix: "/home/me/.local".into() })
+    );
+    assert_eq!(plan(Platform::Linux, linux, "ond", true, false, |_| false), Ok(Plan::Binary(linux.into())));
     for platform in [Platform::Linux, Platform::Windows] {
         let exe = Path::new("/tmp/app");
-        assert_eq!(plan(platform, exe, "ond", true, |_| false), Ok(Plan::Binary(exe.into())));
-        assert_eq!(plan(platform, exe, "ond", false, |_| false), Err(Fallback::ReadOnly));
+        assert_eq!(plan(platform, exe, "ond", true, false, |_| false), Ok(Plan::Binary(exe.into())));
+        assert_eq!(plan(platform, exe, "ond", false, false, |_| false), Err(Fallback::ReadOnly));
     }
 }
 
@@ -466,5 +472,16 @@ async fn a_signed_archive_from_another_release_is_deleted_before_staging_complet
         let signature = RangeServer::start(text.as_bytes(), Serve::fast());
         assert!(matches!(fetch(dir.path(), &body, &signature).await, Err(Error::Signature)));
         assert!(!fs::read_dir(dir.path()).unwrap().filter_map(Result::ok).any(|e| e.file_type().unwrap().is_dir()));
+    }
+}
+
+#[test]
+fn writable_external_drives_use_the_normal_bundle_installation_plan() {
+    let executable = Path::new("/Volumes/External drive/Ond.app/Contents/MacOS/Ond");
+    let bundle = PathBuf::from("/Volumes/External drive/Ond.app");
+    assert_eq!(plan(Platform::Macos, executable, "ond", true, false, |_| false), Ok(Plan::MacBundle(bundle)));
+    assert_eq!(plan(Platform::Macos, executable, "ond", false, false, |_| false), Err(Fallback::ReadOnly));
+    for writable in [false, true] {
+        assert_eq!(plan(Platform::Macos, executable, "ond", writable, true, |_| false), Err(Fallback::DiskImage));
     }
 }

@@ -42,10 +42,15 @@ The `.zip` holds the signed, notarized, stapled `.app` (`ditto -c -k --keepParen
 2. Check it with `codesign --verify --deep --strict`. Its Team ID must match the running app's. An ad-hoc-signed running app (built without the signing secrets) skips the Team ID check but still requires minisign.
 3. Start a detached helper (`/bin/sh` is enough) and quit. The helper waits for the app's process to exit, renames the old bundle aside, moves the new one into its place, deletes the old one, and, only for Restart to Update, reopens the app with `open`. If the move fails, it puts the old bundle back.
 
-Files fetched by the app itself carry no quarantine attribute, so Gatekeeper doesn't ask again. Two cases fall back to `notify`:
+Files fetched by the app itself carry no quarantine attribute, so Gatekeeper doesn't ask again. These cases fall back to `notify`:
 
 - the bundle is running from a translocated path (opened straight from Downloads or the `.dmg`)
+- the bundle is on a read-only mount under `/Volumes` (such as a mounted `.dmg`)
 - the bundle's parent folder isn't writable (a standard user and `/Applications`)
+
+A bundle on a writable external drive can update normally. The app reads the
+mount's read-only flag with `statfs` and tests actual parent-directory access;
+`/Volumes` alone does not identify a disk image.
 
 ### Linux
 

@@ -102,12 +102,19 @@ pub fn translocated(path: &Path) -> bool {
     path.components().any(|c| c.as_os_str() == "AppTranslocation")
 }
 
-pub fn plan(platform: Platform, executable: &Path, app: &str, writable: bool, desktop_exists: impl FnOnce(&Path) -> bool) -> Result<Plan, Fallback> {
+pub fn plan(
+    platform: Platform,
+    executable: &Path,
+    app: &str,
+    writable: bool,
+    read_only_mount: bool,
+    desktop_exists: impl FnOnce(&Path) -> bool,
+) -> Result<Plan, Fallback> {
     if platform == Platform::Macos {
         if translocated(executable) {
             return Err(Fallback::Translocated);
         }
-        if executable.starts_with("/Volumes") {
+        if executable.starts_with("/Volumes") && read_only_mount {
             return Err(Fallback::DiskImage);
         }
         let bundle = executable.ancestors().find(|p| p.extension().is_some_and(|e| e == "app")).ok_or(Fallback::UnknownLayout)?;
@@ -262,7 +269,11 @@ fn inspect(app: &Releases) -> Result<Plan, Fallback> {
         return Err(Fallback::UnsupportedPlatform);
     }
     let exe = std::env::current_exe().map_err(|_| Fallback::UnknownLayout)?;
-    let tentative = plan(platform, &exe, &app.app.to_lowercase(), true, |p| p.is_file())?;
+    #[cfg(target_os = "macos")]
+    let read_only_mount = macos::read_only_mount(&exe).map_err(|_| Fallback::ReadOnly)?;
+    #[cfg(not(target_os = "macos"))]
+    let read_only_mount = false;
+    let tentative = plan(platform, &exe, &app.app.to_lowercase(), true, read_only_mount, |p| p.is_file())?;
     let parent = match &tentative {
         Plan::MacBundle(bundle) => bundle.parent(),
         Plan::LinuxLayout { prefix, .. } => Some(prefix.as_path()),
