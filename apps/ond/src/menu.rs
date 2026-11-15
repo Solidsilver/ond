@@ -10,7 +10,7 @@
 //! the first responder, which winit's view doesn't implement; and muda turns
 //! off menu auto-enabling, so the item stays enabled, claims ⌘V and the paste
 //! goes nowhere. Ours carry the usual keys and hand egui the matching input
-//! instead (see [`EditCmd::events`]).
+//! instead (see `EditCmd::events`, macOS only).
 
 use crate::keys::Cmd;
 #[cfg(target_os = "macos")]
