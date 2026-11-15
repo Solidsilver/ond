@@ -182,8 +182,7 @@ pub enum Action {
     Source(manage::SourceAction),
     /// The library's order, and anything else a setting changes.
     Prefs(PrefsAction),
-    /// Update controls are drawn by the About page and the update notice.
-    #[cfg_attr(not(test), expect(dead_code, reason = "the update UI is added separately"))]
+    /// Something asked of the update checker, from About or the notice.
     Update(UpdateAction),
     PlayBook(String),
     /// Keep the book on this computer: its details are fetched first, then

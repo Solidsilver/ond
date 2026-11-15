@@ -227,6 +227,21 @@ fn every_view_names_its_controls() {
         h.run_steps(3);
         h.check_accessibility();
     }
+    // A newer Rede: the sidebar's notice, the rail's gear, and About with
+    // its notes.
+    app_mut(&mut h).sheet = None;
+    newer_version(app_mut(&mut h));
+    for collapsed in [false, true] {
+        app_mut(&mut h).apply_prefs(PrefsAction::CollapseSidebar(collapsed));
+        h.run_steps(3);
+        h.check_accessibility();
+    }
+    app_mut(&mut h).apply_prefs(PrefsAction::CollapseSidebar(false));
+    app_mut(&mut h).apply(Action::OpenSettings(super::settings_page::Tab::About));
+    h.run_steps(3);
+    h.check_accessibility();
+    app_mut(&mut h).update = None;
+    app_mut(&mut h).updates = Default::default();
     app_mut(&mut h).apply(Action::AskSignOut);
     h.run_steps(3);
     h.check_accessibility();
@@ -342,6 +357,38 @@ fn every_view_names_its_controls() {
     *h.state_mut() = Some(signed_out(&h.ctx.clone(), dir.path()));
     h.run_steps(3);
     h.check_accessibility();
+}
+
+/// Rede 0.2.0 is out, with its release notes in.
+fn newer_version(app: &mut RedeApp) {
+    let v = crate::updates::Version::parse("0.2.0").unwrap();
+    app.update = Some(v.clone());
+    app.updates.latest = Some(v.clone());
+    app.updates.notes = Some((v, Some(Ok(vec![crate::updates::Block::Paragraph("Rede tells you when a new version is out.".into())]))));
+}
+
+#[test]
+fn the_update_notice_opens_about_with_the_new_versions_notes() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = window(dir.path(), BOOKS.len());
+    h.run_steps(2);
+    assert!(h.query_by_label("Rede 0.2.0 is available").is_none(), "no notice without a newer version");
+    newer_version(app_mut(&mut h));
+    h.run_steps(2);
+    h.get_by_label("Rede 0.2.0 is available").click();
+    h.run_steps(3);
+    assert_eq!(app_mut(&mut h).ui.settings, super::settings_page::Tab::About);
+    h.get_by_label("What's new in 0.2.0");
+    h.get_by_label("Rede tells you when a new version is out.");
+    // Folded to the rail, the gear says so and goes to About too.
+    app_mut(&mut h).apply(Action::CloseSheet);
+    app_mut(&mut h).apply(Action::OpenSettings(super::settings_page::Tab::Playback));
+    app_mut(&mut h).apply(Action::CloseSheet);
+    app_mut(&mut h).apply_prefs(PrefsAction::CollapseSidebar(true));
+    h.run_steps(3);
+    h.get_by_label("Settings (⌘,)\nRede 0.2.0 is available").click();
+    h.run_steps(3);
+    assert_eq!(app_mut(&mut h).ui.settings, super::settings_page::Tab::About);
 }
 
 #[test]

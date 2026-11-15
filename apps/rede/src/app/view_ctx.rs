@@ -43,6 +43,14 @@ pub struct ViewCtx<'a> {
     pub art: &'a mut Art,
     /// The search palette, while it's open: what's typed is its own.
     pub palette: &'a mut Option<super::palette::Palette>,
+    /// What the update checker knows, for About.
+    pub updates: &'a crate::updates::Updates,
+    /// A newer version worth the sidebar's notice.
+    pub update: Option<&'a crate::updates::Version>,
+    pub update_check: crate::settings::UpdateCheck,
+    /// The channel picked; `None` follows the build.
+    pub update_channel: Option<crate::settings::UpdateChannel>,
+    pub skipped_update: Option<&'a str>,
     pub actions: &'a mut Vec<Action>,
 }
 
@@ -73,6 +81,11 @@ impl RedeApp {
             stats: &mut self.stats,
             art: &mut self.art,
             palette: &mut self.ui.palette,
+            updates: &self.updates,
+            update: self.update.as_ref(),
+            update_check: self.shown.updates,
+            update_channel: self.shown.update_channel,
+            skipped_update: self.shown.skipped_update.as_deref(),
             actions: &mut self.actions,
         }
     }

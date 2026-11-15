@@ -7,11 +7,8 @@ use crate::settings::{Account, LibraryFilter, LibrarySort};
 use accounts::Scope;
 
 pub struct PrefsView {
-    #[cfg_attr(not(test), expect(dead_code, reason = "the update UI is added separately"))]
     pub updates: crate::settings::UpdateCheck,
-    #[cfg_attr(not(test), expect(dead_code, reason = "the update UI is added separately"))]
     pub update_channel: Option<crate::settings::UpdateChannel>,
-    #[cfg_attr(not(test), expect(dead_code, reason = "the update UI is added separately"))]
     pub skipped_update: Option<String>,
     pub accounts: Vec<Account>,
     pub scope: Scope,

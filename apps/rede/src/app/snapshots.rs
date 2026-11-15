@@ -620,6 +620,35 @@ fn scenes(h: &mut Harness<'_, Option<RedeApp>>, s: &Shooter) {
             });
         }
     }
+    // A newer Rede is out: the notice above the foot, the rail's dot, and
+    // Settings › About with the release notes, full and narrow (the GitHub
+    // copy's rows with REDE_DISTRIBUTION=github).
+    let newer = || {
+        let mut app = app(&ctx, dir.path(), BOOKS.len());
+        playing(&mut app, false);
+        let v = crate::updates::Version::parse("0.2.0").unwrap();
+        app.update = Some(v.clone());
+        app.updates.latest = Some(v.clone());
+        app.updates.notes = Some((
+            v,
+            Some(Ok(vec![
+                crate::updates::Block::Paragraph("Rede tells you when a new version is out.".into()),
+                crate::updates::Block::Heading("Updates".into()),
+                crate::updates::Block::Bullet("Settings › About checks for updates, on the channel you pick, and shows what's new.".into()),
+                crate::updates::Block::Bullet("A notice above the sidebar's foot says when one is out.".into()),
+            ])),
+        ));
+        app
+    };
+    for (size, suffix) in [(FULL, ""), (crate::MIN_SIZE, "-narrow")] {
+        h.set_size(egui::vec2(size[0], size[1]));
+        scene(h, s, &format!("update-available{suffix}"), newer);
+        scene(h, s, &format!("settings-about-update{suffix}"), || {
+            let mut app = newer();
+            app.apply(Action::OpenSettings(super::settings_page::Tab::About));
+            app
+        });
+    }
     h.set_size(egui::vec2(FULL[0], FULL[1]));
     // Settings › Sources with the account in view syncing; with three
     // accounts, then with one signed out and the one in view offline, its

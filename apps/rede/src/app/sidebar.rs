@@ -14,6 +14,9 @@
 //! together on one shelf, so the heading names them rather than switching
 //! between them; a switcher comes with per-library browsing.
 //!
+//! While a newer Rede is out, a notice sits above the foot, as on Ond's
+//! sidebar, and the rail's gear wears a dot; either opens Settings › About.
+//!
 //! Collapsed (⌥⌘S, or the button by the heading) it's a rail of icons, as
 //! Ond's sidebar becomes in a narrow window; a window too narrow for the full
 //! column shows the rail whatever the preference, so nothing goes missing.
@@ -224,6 +227,12 @@ impl ViewCtx<'_> {
                     self.help_button(ui, FOOTER_BUTTON);
                 });
             });
+            if let Some(v) = self.update {
+                ui.add_space(6.0);
+                if kit::update_notice(ui, &format!("Rede {v} is available")).clicked() {
+                    self.actions.push(Action::OpenSettings(super::settings_page::Tab::About));
+                }
+            }
         });
     }
 
@@ -259,7 +268,7 @@ impl ViewCtx<'_> {
             }
         });
         ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
-            self.settings_button(ui);
+            self.rail_settings_button(ui);
             self.help_button(ui, FOOTER_BUTTON);
             self.account_switcher(ui, kit::SwitcherPlace::Rail);
         });
@@ -448,6 +457,19 @@ impl ViewCtx<'_> {
         let t = Tokens::of(ui);
         if icons::sized_button(ui, Icon::Gear, "Settings (⌘,)", vec2(FOOTER_BUTTON, FOOTER_BUTTON), 15.0, Some(t.muted)).clicked() {
             self.actions.push(Action::OpenSettings(self.settings));
+        }
+    }
+
+    /// The rail's gear: with a dot while a newer Rede is out, and then it
+    /// opens Settings › About.
+    fn rail_settings_button(&mut self, ui: &mut Ui) {
+        let Some(v) = self.update else { return self.settings_button(ui) };
+        let t = Tokens::of(ui);
+        let tip = format!("Settings (⌘,)\nRede {v} is available");
+        let button = icons::sized_button(ui, Icon::Gear, &tip, vec2(FOOTER_BUTTON, FOOTER_BUTTON), 15.0, Some(t.muted));
+        kit::notice_dot(ui, button.rect);
+        if button.clicked() {
+            self.actions.push(Action::OpenSettings(super::settings_page::Tab::About));
         }
     }
 
