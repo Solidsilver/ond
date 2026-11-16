@@ -12,7 +12,9 @@ Only copies built by the release workflow look (`OND_DISTRIBUTION` / `REDE_DISTR
 
 ## Installing one
 
-`updates` has three settings: `off`, `notify` (say a newer version is out and link to it) and `install` (also fetch it and install it when the app quits).
+`updates` has three settings: `off`, `notify` (say a newer version is out) and `install` (also fetch it and install it when the app quits).
+
+A newer version's row in Settings › About offers three ways to get it. **Install** fetches and stages that version now, exactly as `install` would; it's how `notify` installs inside the app. **Get from GitHub** opens the release page, to download it by hand. A copy that can't install itself (see Fall back) offers only that, as its main button, and says why. With `install` on, the download has already started by the time the row shows.
 
 ### Order of events
 
