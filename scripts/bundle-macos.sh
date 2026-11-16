@@ -71,7 +71,8 @@ rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 cp "$binary" "$app/Contents/MacOS/Ond"
 cp packaging/macos/Ond.icns "$app/Contents/Resources/Ond.icns"
-sed -e "s/@VERSION@/$version/" \
+# Apple requires a numeric marketing version; the archive and About keep beta.
+sed -e "s/@VERSION@/${version%%-*}/" \
     -e "s/@BUILD@/$build/" \
     -e "s/@MIN_MACOS@/$MIN_MACOS/" \
     -e "s/@COPYRIGHT@/© $year Ond contributors/" \
