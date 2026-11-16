@@ -11,9 +11,16 @@ accounts = { version = "0.6.0", path = "../accounts" }
 chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
 egui = "0.37.0"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
+minisign-verify = "0.3.0"
 nucleo-matcher = "0.3.1"
+reqwest = { version = "0.13.5", default-features = false, features = ["rustls", "http2"] }
+roxmltree = "0.21.2"
+semver = "1.0.28"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
+tempfile = "3.27.0"
+thiserror = "2.0.21"
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "sync", "time", "fs", "io-util"] }
 tracing = "0.1.44"
 unicode-normalization = "0.1.26"
 
@@ -27,10 +34,12 @@ preview = []
 
 [dev-dependencies]
 egui_kittest = { version = "0.37.0", features = ["wgpu"] }
+testkit = { path = "../testkit" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 block2 = "0.6.2"
 dispatch2 = "0.3.1"
+libc = "0.2"
 objc2 = "0.6.5"
 objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSApplication", "NSImage", "NSWindow", "NSResponder", "NSView", "NSButton", "NSControl"] }
 objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std", "CFCGTypes"] }
@@ -40,3 +49,7 @@ objc2-media-player = { version = "0.3.2", default-features = false, features = [
 [target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
 # Reads the desktop's title bar button layout from the settings portal.
 zbus = "5.19.0"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_System_Threading"] }
+zip = { version = "8.6.0", default-features = false, features = ["deflate"] }

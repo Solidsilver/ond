@@ -137,7 +137,8 @@ Experimental settings may change or go away between versions.
 
 | Setting | Values | Default |
 |---|---|---|
-| `updates` | `"notify"`: look once a day for a newer release and say when there is one; `"off"`. Only copies from the GitHub releases look: one Nix installed never does | `"notify"` |
+| `updates` | `"notify"`: look once a day for a newer release and say when there is one; `"install"`: also download a signed update and install on quit; `"off"`. Only copies from the GitHub releases look: one Nix installed never does | `"notify"` |
+| `update_channel` | `"releases"`: full releases only; `"betas"`: includes prereleases. `null` follows the build: Betas for a prerelease, Releases otherwise. Switching uses the last check's cached results | `null` |
 | `diagnostics_bar` | The diagnostics bar along the bottom | `false` |
 
 The rest of `settings.json` is state the app keeps for itself (window positions, volume, column widths, whether the queue is open, grid or list views), and Ond ignores it in `managed.json`.

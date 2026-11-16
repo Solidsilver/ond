@@ -18,8 +18,12 @@
 //! Under them, the account in view has its own group: its full address,
 //! who's signed in and how, and the last sync with Sync now (the account
 //! menu keeps Sync now and Sign out… too, a click from the sidebar). Its
-//! state is on its row. About is Ond's About without the updates, which
-//! Rede doesn't look for yet.
+//! state is on its row. About is Ond's: the version, then the kit's
+//! Updates group (Check for updates and Install updates automatically, the
+//! channel, Check now with how the last look went, or a newer version with
+//! Download and Skip, its download, Restart to Update or Retry, and its
+//! release notes), then the links. A copy from a package manager, or one
+//! built from source, says so instead.
 
 use super::manage::SourceAction;
 use super::view_ctx::ViewCtx;
@@ -62,9 +66,6 @@ const TIMER: [u32; 10] = [5, 10, 15, 20, 30, 45, 60, 75, 90, 120];
 const LIMITS_GB: [u64; 9] = [1, 2, 5, 10, 25, 50, 100, 250, 500];
 const GB: u64 = 1_000_000_000;
 
-/// Where the source lives, and where problems go.
-const REPO: &str = "https://github.com/Solidsilver/ond";
-
 impl ViewCtx<'_> {
     /// What's on `tab`, in the window's pane.
     pub(super) fn settings_tab(&mut self, ui: &mut Ui, tab: Tab) {
@@ -73,7 +74,7 @@ impl ViewCtx<'_> {
             Tab::Downloads => self.download_settings(ui),
             Tab::Appearance => self.appearance_settings(ui),
             Tab::Sources => self.source_settings(ui),
-            Tab::About => about(ui),
+            Tab::About => self.about(ui),
         }
     }
 
@@ -234,22 +235,40 @@ impl ViewCtx<'_> {
     }
 }
 
-/// The app and its version, and where it's made.
-fn about(ui: &mut Ui) {
-    let t = Tokens::of(ui);
-    let icon = kit::app_icon(ui.ctx(), "rede", include_bytes!("../../../../packaging/rede/linux/hicolor/256x256/apps/dev.solidsilver.rede.png"));
-    kit::about_header(ui, &icon, "Rede", &format!("Version {}", env!("CARGO_PKG_VERSION")));
-    ui.add_space(20.0);
-    kit::group(ui, "Links", |ui| {
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 18.0;
-            for (text, url) in [("Source code", REPO.to_owned()), ("Report a problem", format!("{REPO}/issues"))] {
-                if crate::widgets::link(ui, text, FontId::proportional(13.0), t.accent).clicked() {
-                    ui.ctx().open_url(egui::OpenUrl::new_tab(url));
+impl ViewCtx<'_> {
+    /// The app and its version, whether Rede looks for newer ones and on
+    /// which channel, a newer release's notes, and where it's made.
+    fn about(&mut self, ui: &mut Ui) {
+        let t = Tokens::of(ui);
+        let current = crate::updates::current();
+        let icon = kit::app_icon(ui.ctx(), "rede", include_bytes!("../../../../packaging/rede/linux/hicolor/256x256/apps/dev.solidsilver.rede.png"));
+        kit::about_header(ui, &icon, "Rede", &format!("Version {current}"));
+        ui.add_space(20.0);
+        let about = kit::AboutUpdates {
+            app: "Rede",
+            current: &current,
+            distribution: crate::updates::channel(),
+            updates: self.updates,
+            check: self.update_check,
+            channel: self.update_channel,
+            skipped: self.skipped_update,
+            hint: "Once a day, Rede looks on GitHub for a newer version and tells you when there is one.",
+            check_locked: None,
+            channel_locked: None,
+        };
+        let asked = kit::about_updates(ui, &about);
+        self.actions.extend(asked.into_iter().map(Action::Update));
+        kit::group(ui, "Links", |ui| {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 18.0;
+                for (text, url) in [("Source code", crate::updates::REPO.to_owned()), ("Report a problem", format!("{}/issues", crate::updates::REPO))] {
+                    if crate::widgets::link(ui, text, FontId::proportional(13.0), t.accent).clicked() {
+                        ui.ctx().open_url(egui::OpenUrl::new_tab(url));
+                    }
                 }
-            }
+            });
         });
-    });
+    }
 }
 
 /// A value read out on the right of a row.

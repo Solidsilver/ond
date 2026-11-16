@@ -97,6 +97,13 @@
 //!   one column of one width: notices fade, errors (with a Retry, through
 //!   [`Toasts::error`]) and offers stay until clicked away, and a
 //!   [`Toasts::note`] fades with its button (an Undo).
+//! - [`updates`](mod@updates): what an app says about its own updates:
+//!   About's [`about_updates`] (drawn from [`AboutUpdates`]: Check for
+//!   updates and Install updates automatically, the channel, how the last
+//!   look went or a newer version with Download and Skip, or its download,
+//!   Restart to Update or Retry, and its release notes), the sidebar's
+//!   [`update_notice`] (worded by [`notice_label`]) and the rail's
+//!   [`notice_dot`].
 
 pub mod buttons;
 pub mod charts;
@@ -116,6 +123,7 @@ pub mod source_row;
 pub mod sources;
 pub mod text;
 pub mod toasts;
+pub mod updates;
 
 pub use buttons::*;
 pub use charts::*;
@@ -135,6 +143,7 @@ pub use source_row::*;
 pub use sources::*;
 pub use text::*;
 pub use toasts::Toasts;
+pub use updates::*;
 
 /// A harness whose first frame installs the theme (its fonts arrive a
 /// frame later) and whose later frames draw `body`.

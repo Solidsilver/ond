@@ -16,6 +16,9 @@ use crate::window::WindowMode;
 /// action just applied may have changed them.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PrefsView {
+    pub updates: crate::settings::UpdateCheck,
+    pub update_channel: Option<crate::settings::UpdateChannel>,
+    pub skipped_update: Option<String>,
     pub scope: accounts::Scope,
     pub combine_copies: bool,
     pub prefer_copy: crate::settings::PreferCopy,
@@ -79,6 +82,9 @@ impl PrefsView {
     pub fn read(prefs: &Prefs) -> Self {
         let (server_managed, username_managed) = (prefs.managed("server") || prefs.managed("sources"), prefs.managed("username") || prefs.managed("sources"));
         prefs.get(|s| Self {
+            updates: s.updates,
+            update_channel: s.update_channel,
+            skipped_update: s.skipped_update.clone(),
             scope: s.scope.clone(),
             combine_copies: s.combine_copies,
             prefer_copy: s.prefer_copy,
@@ -115,6 +121,8 @@ impl PrefsView {
 
 /// A change to an appearance or behaviour preference.
 pub enum PrefsAction {
+    Updates(crate::settings::UpdateCheck),
+    UpdateChannel(Option<crate::settings::UpdateChannel>),
     Scope(super::all_sources::ScopeAction),
     Theme(ThemePref),
     /// The interface's size, in percent.
@@ -159,6 +167,8 @@ impl OndApp {
         use super::{AnalysisAction, OfflineAction, WindowAction};
         let path = match action {
             Action::Prefs(p) => match p {
+                PrefsAction::Updates(_) => "updates",
+                PrefsAction::UpdateChannel(_) => "update_channel",
                 PrefsAction::Scope(_) => return false,
                 PrefsAction::Theme(_) => "theme",
                 PrefsAction::Zoom(_) => "zoom",
@@ -189,6 +199,7 @@ impl OndApp {
             Action::Offline(OfflineAction::WorkOffline(_)) => "work_offline",
             Action::Offline(OfflineAction::Unplayable(_)) => "offline_unplayable",
             Action::Update(super::UpdateAction::Check(_)) => "updates",
+            Action::Update(super::UpdateAction::Channel(_)) => "update_channel",
             Action::Sources(
                 super::SourceAction::AskRemove(_)
                 | super::SourceAction::Remove(_)
@@ -203,6 +214,8 @@ impl OndApp {
 
     pub(super) fn apply_prefs(&mut self, action: PrefsAction) {
         match action {
+            PrefsAction::Updates(check) => self.set_update_check(check),
+            PrefsAction::UpdateChannel(channel) => self.set_update_channel(channel),
             PrefsAction::Scope(a) => self.apply_scope(a),
             PrefsAction::Theme(pref) => {
                 crate::theme::set_pref(&self.ctx, pref);

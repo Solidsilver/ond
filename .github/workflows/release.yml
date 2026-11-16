@@ -20,8 +20,9 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  # These builds look for newer releases (apps/ond/src/updates.rs).
+  # These builds look for newer releases through shell::updates.
   OND_DISTRIBUTION: github
+  REDE_DISTRIBUTION: github
 
 jobs:
   # Which app the tag is for and the version it names. A tag must name the
@@ -208,7 +209,9 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          sparse-checkout: .github/release-notes
+          sparse-checkout: |
+            .github/release-notes
+            scripts
           # The tags, to find this app's previous release.
           fetch-depth: 0
 
@@ -216,6 +219,19 @@ jobs:
         with:
           path: dist
           merge-multiple: true
+
+      - name: Install minisign 0.12
+        run: |
+          curl --fail --location --retry 3 https://github.com/jedisct1/minisign/releases/download/0.12/minisign-0.12-linux.tar.gz -o "$RUNNER_TEMP/minisign.tar.gz"
+          echo "9a599b48ba6eb7b1e80f12f36b94ceca7c00b7a5173c95c3efc88d9822957e73  $RUNNER_TEMP/minisign.tar.gz" | sha256sum --check
+          tar -xzf "$RUNNER_TEMP/minisign.tar.gz" -C "$RUNNER_TEMP" minisign-linux/x86_64/minisign
+          sudo install -m755 "$RUNNER_TEMP/minisign-linux/x86_64/minisign" /usr/local/bin/minisign
+
+      - name: Sign update files
+        env:
+          UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
+          UPDATE_SIGNING_PASSWORD: ${{ secrets.UPDATE_SIGNING_PASSWORD }}
+        run: bash scripts/sign-updates.sh dist
 
       # Hand-written notes for this version, if there are any, above GitHub's
       # changelog: .github/release-notes/ond/v0.5.0.md for ond-v0.5.0 (or v0.5.0).
@@ -226,17 +242,26 @@ jobs:
           echo "notes=$notes" >> "$GITHUB_ENV"
 
       # A repository-wide previous release might belong to the other app.
-      # Creation order also keeps a stable Rede release after its beta tags.
+      # A beta's changelog runs from the tag before it, beta or not. A full
+      # release's runs from the full release before it, so it covers its
+      # betas too; only an app's first full release falls back to its betas.
       - name: Previous release
+        env:
+          PRERELEASE: ${{ needs.tag.outputs.prerelease }}
         run: |
           case "$APP" in
-            ond) pattern='^(ond-)?v[0-9]+\.[0-9]+\.[0-9]+$' ;;
-            rede) pattern='^rede-v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$' ;;
+            ond) prefix='(ond-)?v' ;;
+            rede) prefix='rede-v' ;;
           esac
-          previous="$(
-            git tag --merged "$GITHUB_SHA" --sort=-creatordate -l | grep -E "$pattern" |
+          stable="^${prefix}[0-9]+\.[0-9]+\.[0-9]+$"
+          any="^${prefix}[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$"
+          before() {
+            git tag --merged "$GITHUB_SHA" --sort=-creatordate -l | grep -E "$1" |
               awk -v current="$GITHUB_REF_NAME" '$0 != current { print; exit }'
-          )"
+          }
+          previous=""
+          if [ "$PRERELEASE" != "true" ]; then previous="$(before "$stable")"; fi
+          if [ -z "$previous" ]; then previous="$(before "$any")"; fi
           echo "Previous $APP release: ${previous:-none}"
           echo "previous=$previous" >> "$GITHUB_ENV"
 

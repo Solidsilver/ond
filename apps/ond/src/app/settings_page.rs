@@ -10,7 +10,7 @@ use crate::icons::{self, Icon};
 use crate::playback::{BITRATES, PlaybackPrefs, QualityMode, RgMode, TranscodeFormat};
 use crate::queue::{AddAt, ClearWhat, NextAt, OnPlay, Preset};
 use crate::settings::{PreferCopy, SourceKind};
-use crate::theme::{Accent, ThemePref, Tokens, semibold};
+use crate::theme::{Accent, ThemePref, Tokens};
 use crate::visuals::visualizer::Pick;
 use crate::visuals::waveform::{self, Bars};
 use crate::widgets::{Head, ROW_PAD, choice, divider, group, managed, menu_label, row_with, secondary, secondary_danger, setting, switch, thin_slider};
@@ -103,33 +103,30 @@ impl OndApp {
         }
     }
 
-    /// The app and its version, whether Ond looks for newer ones (copies
-    /// from the GitHub releases; a package manager updates its own), a newer
-    /// release's notes, and the few settings about the app itself rather than
-    /// about the music.
+    /// The app and its version, whether Ond looks for newer ones, installs
+    /// them itself, and on which channel (copies from the GitHub releases; a
+    /// package manager updates its own), a newer release's notes, and the few
+    /// settings about the app itself rather than about the music.
     fn about(&mut self, ui: &mut Ui) {
         let t = Tokens::of(ui);
-        let current = crate::updates::Version::current();
+        let current = crate::updates::current();
         let icon = kit::app_icon(ui.ctx(), "ond", include_bytes!("../../../../packaging/linux/hicolor/256x256/apps/dev.solidsilver.ond.png"));
         kit::about_header(ui, &icon, "Ond", &format!("Version {current}"));
         ui.add_space(20.0);
-        let newer = self.updates.latest.filter(|v| *v > current);
-        group(ui, "Updates", |ui| match crate::updates::channel() {
-            crate::updates::Channel::GitHub => {
-                let on = self.prefs.get(|s| s.updates) != crate::settings::UpdateCheck::Off;
-                let hint = "Once a day, Ond looks on GitHub for a newer version and tells you when there is one.";
-                self.pref_switch(ui, "updates", "Check for updates", hint, on, |on| {
-                    let check = if on { crate::settings::UpdateCheck::Notify } else { crate::settings::UpdateCheck::Off };
-                    Action::Update(super::UpdateAction::Check(check))
-                });
-                self.update_status(ui, current, newer);
-            }
-            crate::updates::Channel::Packaged(by) => setting(ui, &format!("Updates come from {by}"), "", |_| ()),
-            crate::updates::Channel::Source => setting(ui, "Built from source", "This copy doesn't look for updates.", |_| ()),
-        });
-        if let Some(v) = newer {
-            self.release_notes(ui, v);
-        }
+        let about = kit::AboutUpdates {
+            app: "Ond",
+            current: &current,
+            distribution: crate::updates::channel(),
+            updates: &self.updates,
+            check: self.ui.prefs.updates,
+            channel: self.ui.prefs.update_channel,
+            skipped: self.ui.prefs.skipped_update.as_deref(),
+            hint: "Once a day, Ond looks on GitHub for a newer version and tells you when there is one.",
+            check_locked: self.prefs.managed("updates").then_some(crate::managed::LOCKED),
+            channel_locked: self.prefs.managed("update_channel").then_some(crate::managed::LOCKED),
+        };
+        let asked = kit::about_updates(ui, &about);
+        self.actions.extend(asked.into_iter().map(Action::Update));
         group(ui, "Links", |ui| {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 18.0;
@@ -143,83 +140,6 @@ impl OndApp {
         group(ui, "Advanced", |ui| {
             let hint = "The signal path, buffer, downloads, sync and server timing, in a thin bar along the bottom (⌥⌘I).";
             self.pref_switch(ui, "diagnostics_bar", "Show diagnostics bar", hint, self.ui.prefs.diagnostics_bar, PrefsAction::Diagnostics);
-        });
-    }
-
-    /// The row under Check for updates: a newer version with Download, or
-    /// how the last look went, with Check Now.
-    fn update_status(&mut self, ui: &mut Ui, current: crate::updates::Version, newer: Option<crate::updates::Version>) {
-        let u = &self.updates;
-        if let Some(v) = newer {
-            let skipped = self.prefs.get(|s| s.skipped_update.as_deref() == Some(&v.to_string()));
-            let hint = if skipped { format!("You have {current}. You skipped this version.") } else { format!("You have {current}.") };
-            setting(ui, &format!("Ond {v} is available"), &hint, |ui| {
-                if crate::widgets::primary(ui, Some(Icon::Download), "Download").clicked() {
-                    self.actions.push(Action::Update(super::UpdateAction::Open(v)));
-                }
-                if !skipped && secondary(ui, "Skip").clicked() {
-                    self.actions.push(Action::Update(super::UpdateAction::Skip(v)));
-                }
-            });
-            return;
-        }
-        let (label, hint) = if u.checking {
-            ("Checking…".to_owned(), String::new())
-        } else if let Some(e) = &u.error {
-            ("Couldn't check for updates".to_owned(), e.clone())
-        } else if let Some(at) = u.checked {
-            ("Ond is up to date".to_owned(), format!("Checked {}.", ago(at)))
-        } else {
-            ("Not checked yet".to_owned(), String::new())
-        };
-        let checking = u.checking;
-        setting(ui, &label, &hint, |ui| {
-            if ui.add_enabled_ui(!checking, |ui| secondary(ui, "Check now")).inner.clicked() {
-                self.actions.push(Action::Update(super::UpdateAction::CheckNow));
-            }
-        });
-    }
-
-    /// What's new in `v`, from its release notes (fetched the first time
-    /// they're shown).
-    fn release_notes(&mut self, ui: &mut Ui, v: crate::updates::Version) {
-        let t = Tokens::of(ui);
-        if self.updates.notes.as_ref().is_none_or(|(n, _)| *n != v) {
-            self.actions.push(Action::Update(super::UpdateAction::Notes(v)));
-        }
-        group(ui, &format!("What's new in {v}"), |ui| {
-            ui.spacing_mut().item_spacing.y = 6.0;
-            match self.updates.notes.as_ref().and_then(|(_, n)| n.as_ref()) {
-                None => paragraph(ui, "Loading the release notes…"),
-                Some(Err(_)) => paragraph(ui, "Ond couldn't load the release notes. They're on the release page."),
-                Some(Ok(blocks)) => {
-                    for (i, b) in blocks.iter().enumerate() {
-                        match b {
-                            crate::updates::Block::Heading(h) => {
-                                if i > 0 {
-                                    ui.add_space(8.0);
-                                }
-                                ui.label(egui::RichText::new(h).font(FontId::new(13.0, semibold())).color(t.text));
-                            }
-                            crate::updates::Block::Paragraph(p) => {
-                                ui.add(egui::Label::new(egui::RichText::new(p).size(13.0).color(t.text)).wrap());
-                            }
-                            crate::updates::Block::Bullet(b) => {
-                                ui.horizontal_top(|ui| {
-                                    ui.spacing_mut().item_spacing.x = 8.0;
-                                    let (dot, _) = ui.allocate_exact_size(vec2(6.0, 18.0), Sense::hover());
-                                    ui.painter().circle_filled(pos2(dot.center().x, dot.top() + 9.0), 2.0, t.muted);
-                                    ui.add(egui::Label::new(egui::RichText::new(b).size(13.0).color(t.text)).wrap());
-                                });
-                            }
-                        }
-                    }
-                }
-            }
-            ui.add_space(4.0);
-            if crate::widgets::link(ui, "Release page", FontId::proportional(13.0), t.accent).clicked() {
-                self.actions.push(Action::Update(super::UpdateAction::Open(v)));
-            }
         });
     }
 
@@ -967,18 +887,6 @@ impl OndApp {
 /// A value read out on the right of a row.
 fn value(ui: &mut Ui, text: &str, color: egui::Color32) {
     ui.label(egui::RichText::new(text).size(13.0).color(color));
-}
-
-/// "just now", "5 minutes ago", "3 hours ago", "2 days ago".
-fn ago(at: std::time::SystemTime) -> String {
-    let s = at.elapsed().map_or(0, |d| d.as_secs());
-    let (n, unit) = match s {
-        0..60 => return "just now".into(),
-        60..3600 => (s / 60, "minute"),
-        3600..86400 => (s / 3600, "hour"),
-        _ => (s / 86400, "day"),
-    };
-    format!("{n} {unit}{} ago", if n == 1 { "" } else { "s" })
 }
 
 /// Muted text under a group's rows, about all of them.

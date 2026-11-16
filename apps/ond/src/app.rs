@@ -415,6 +415,7 @@ pub struct OndApp {
     /// Wakes the update checker for Check Now.
     update_now: Arc<tokio::sync::Notify>,
     updates: Updates,
+    update_cache: std::path::PathBuf,
     /// The folder picker (the system's; a test's answers at once).
     pick_folder: sources::FolderPicker,
     /// Save dialog for exporting playlists as M3U.
@@ -431,10 +432,8 @@ impl OndApp {
         let post = app.bridge.poster();
         app.menu = crate::menu::MenuBar::install(move |cmd| post(Msg::Menu(cmd)));
         app.update_check.store(app.prefs.get(|s| s.updates) != crate::settings::UpdateCheck::Off, std::sync::atomic::Ordering::Relaxed);
-        let post = app.bridge.poster();
-        crate::updates::start(app.bridge.runtime(), &crate::updates::OND, app.update_check.clone(), app.update_now.clone(), move |r| {
-            post(Msg::UpdateChecked(r))
-        });
+        app.bridge.clean_update_stages(app.update_cache.clone());
+        app.bridge.start_updates(app.update_check.clone(), app.update_now.clone());
         // The window opened from this plan (see `main`); our title bar follows it.
         app.prefs.get(|s| s.window.plan()).apply_frame(&cc.egui_ctx);
         Ok(app)
@@ -607,6 +606,7 @@ impl OndApp {
             update_check: Arc::default(),
             update_now: Arc::default(),
             updates: Updates::default(),
+            update_cache: paths.art_cache.with_file_name("updates"),
             pick_folder: sources::system_picker(),
             save_m3u: sources::system_save_m3u(),
             prefs,
@@ -686,14 +686,7 @@ impl OndApp {
             },
             Msg::Menu(cmd) => self.command(cmd),
             Msg::FolderChosen { target, path } => self.folder_chosen(target, path),
-            Msg::UpdateChecked(result) => self.update_checked(result),
-            Msg::ReleaseNotes(v, notes) => {
-                if let Some((n, slot)) = &mut self.updates.notes
-                    && *n == v
-                {
-                    *slot = Some(notes);
-                }
-            }
+            Msg::Update(msg) => self.update_message(msg),
             Msg::Error(e) => self.show_failure(e),
         }
     }
@@ -1311,6 +1304,11 @@ impl eframe::App for OndApp {
         self.prefs.flush();
         // Before the process exits: the output puts the device back the way it found it.
         self.engine.shutdown(ENGINE_SHUTDOWN);
+        if let Err(error) = self.updates.install_on_quit() {
+            tracing::error!("update installation: {error}");
+            let _ = std::fs::create_dir_all(&self.update_cache);
+            let _ = std::fs::write(self.update_cache.join("last-install-error"), error.to_string());
+        }
     }
 }
 

@@ -6,6 +6,8 @@
 //! with its own shelf and downloads folder; `scope` remembers which one is
 //! open.
 
+pub use shell::updates::{UpdateChannel, UpdateCheck};
+
 use accounts::{AccountId, Scope, SourceColor};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -173,6 +175,14 @@ impl Account {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Settings {
+    /// Look for newer Rede versions (GitHub distributions only).
+    #[serde(default)]
+    pub updates: UpdateCheck,
+    /// Absent follows the installed build's release channel.
+    #[serde(default, deserialize_with = "shell::updates::lenient_update_channel", skip_serializing_if = "Option::is_none")]
+    pub update_channel: Option<UpdateChannel>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skipped_update: Option<String>,
     /// The accounts, oldest first.
     #[serde(default)]
     pub accounts: Vec<Account>,
@@ -210,6 +220,9 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
+            updates: UpdateCheck::default(),
+            update_channel: None,
+            skipped_update: None,
             accounts: Vec::new(),
             scope: Scope::default(),
             theme: Default::default(),
@@ -509,6 +522,29 @@ impl Paths {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn update_preferences_round_trip_betas_and_unknown_channels_follow_the_build() {
+        use shell::updates::{UpdateChannel, UpdateCheck, Version};
+        let s = super::Settings::from_json(br#"{"updates":"off","update_channel":"betas","skipped_update":"0.1.0-beta.2"}"#).unwrap();
+        assert_eq!(s.updates, UpdateCheck::Off);
+        assert_eq!(s.update_channel, Some(UpdateChannel::Betas));
+        let back = super::Settings::from_json(&serde_json::to_vec(&s).unwrap()).unwrap();
+        assert_eq!(back.update_channel, s.update_channel);
+        assert_eq!(back.skipped_update, s.skipped_update);
+        assert_eq!(back.skipped_update.as_deref().and_then(Version::parse).unwrap().to_string(), "0.1.0-beta.2");
+        for channel in [r#""nightly""#, "42", "{}", "null"] {
+            let json = format!(r#"{{"update_channel":{channel},"skipped_update":"0.1.0-beta.2"}}"#);
+            let read: super::Settings = serde_json::from_str(&json).unwrap();
+            assert_eq!(read.update_channel, None);
+            assert_eq!(read.skipped_update.as_deref(), Some("0.1.0-beta.2"));
+        }
+        let future = super::Settings::from_json(br#"{"updates":"install","update_channel":"betas"}"#).unwrap();
+        assert_eq!(future.updates, UpdateCheck::Install);
+        assert_eq!(super::Settings::from_json(br#"{"updates":"unknown"}"#).unwrap().updates, UpdateCheck::Notify);
+        assert_eq!(future.update_channel, Some(UpdateChannel::Betas));
+        assert_eq!(super::Settings::from_json(b"{}").unwrap().update_channel, None);
+    }
 
     fn login() -> Settings {
         Settings { accounts: vec![Account::new("https://books.example.com", "sam")], ..Default::default() }

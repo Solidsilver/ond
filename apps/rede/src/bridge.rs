@@ -24,6 +24,8 @@ use std::sync::mpsc::Sender;
 /// matches its own group whole, so a message added to a group can't be left
 /// unhandled.
 pub enum Msg {
+    /// App releases are independent of the signed-in book account.
+    Update(crate::updates::UpdateMsg),
     Account(AccountMsg),
     Offline {
         session: u64,
@@ -219,6 +221,56 @@ struct OpenIdSlot {
 }
 
 impl Bridge {
+    /// Repository updates belong to no account, so this deliberately uses
+    /// the raw sender rather than a session-scoped bridge.
+    pub fn stage_update(
+        &self,
+        state: &mut crate::updates::Updates,
+        eligible: Option<&crate::updates::Version>,
+        check: crate::updates::UpdateCheck,
+        cache: std::path::PathBuf,
+    ) {
+        let tx = self.tx.clone();
+        let notify = self.notify.clone();
+        state.stage_update(eligible, check, &self.rt, &crate::updates::REDE, cache, move |event| {
+            let _ = tx.send(Msg::Update(crate::updates::UpdateMsg::Install(event)));
+            notify();
+        });
+    }
+
+    /// Cleanup is app-wide too; a live stage's lock protects other instances.
+    pub fn clean_update_stages(&self, cache: std::path::PathBuf) {
+        let tx = self.tx.clone();
+        let notify = self.notify.clone();
+        self.rt.spawn_blocking(move || {
+            if let Err(error) = crate::updates::install::startup(&cache) {
+                let _ = tx.send(Msg::Update(crate::updates::UpdateMsg::InstallError(error)));
+                notify();
+            }
+        });
+    }
+
+    /// Starts the app-wide checker, independent of account sessions. The
+    /// callback keeps only the sender and repaint notifier alive.
+    pub fn start_updates(&self, on: Arc<std::sync::atomic::AtomicBool>, now: Arc<tokio::sync::Notify>) {
+        let tx = self.tx.clone();
+        let notify = self.notify.clone();
+        crate::updates::start(&self.rt, &crate::updates::REDE, crate::updates::VERSION, crate::updates::channel(), on, now, move |result| {
+            let _ = tx.send(Msg::Update(crate::updates::UpdateMsg::Checked(result)));
+            notify();
+        });
+    }
+
+    /// Fetches notes for this app's release, regardless of the active account.
+    pub fn update_notes(&self, v: crate::updates::Version) {
+        let tx = self.tx.clone();
+        let notify = self.notify.clone();
+        crate::updates::fetch_notes(&self.rt, &crate::updates::REDE, crate::updates::VERSION, v.clone(), move |notes| {
+            let _ = tx.send(Msg::Update(crate::updates::UpdateMsg::ReleaseNotes(v, notes)));
+            notify();
+        });
+    }
+
     pub fn new(rt: tokio::runtime::Handle, tx: Sender<Msg>, notify: Notify, keeper: Keeper, paths: Arc<Paths>) -> Self {
         Self {
             rt,

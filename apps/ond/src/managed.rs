@@ -59,6 +59,7 @@ const ALLOWED: &[&str] = &[
     "offline_unplayable",
     "work_offline",
     "updates",
+    "update_channel",
     "analyze_playing",
     "experimental.spectrum",
     "experimental.spectrogram",

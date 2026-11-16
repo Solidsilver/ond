@@ -227,6 +227,38 @@ fn every_view_names_its_controls() {
         h.run_steps(3);
         h.check_accessibility();
     }
+    // A newer Rede: the sidebar's notice, the rail's gear, and About with
+    // its notes.
+    app_mut(&mut h).sheet = None;
+    newer_version(app_mut(&mut h));
+    for collapsed in [false, true] {
+        app_mut(&mut h).apply_prefs(PrefsAction::CollapseSidebar(collapsed));
+        h.run_steps(3);
+        h.check_accessibility();
+    }
+    app_mut(&mut h).apply_prefs(PrefsAction::CollapseSidebar(false));
+    app_mut(&mut h).apply(Action::OpenSettings(super::settings_page::Tab::About));
+    h.run_steps(3);
+    h.check_accessibility();
+    // And installing it, in the notice and in About: the switch on, then
+    // downloading, ready, failed, unable to install itself, and the last
+    // update not having installed.
+    app_mut(&mut h).apply_prefs(PrefsAction::Updates(crate::settings::UpdateCheck::Install));
+    for install in install_states() {
+        app_mut(&mut h).apply(Action::CloseSheet);
+        app_mut(&mut h).updates.install = install;
+        h.run_steps(3);
+        h.check_accessibility();
+        app_mut(&mut h).apply(Action::OpenSettings(super::settings_page::Tab::About));
+        h.run_steps(3);
+        h.check_accessibility();
+    }
+    app_mut(&mut h).updates.install_error = Some(crate::updates::install::Error::Signature);
+    h.run_steps(3);
+    h.check_accessibility();
+    app_mut(&mut h).apply(Action::CloseSheet);
+    app_mut(&mut h).update = None;
+    app_mut(&mut h).updates = Default::default();
     app_mut(&mut h).apply(Action::AskSignOut);
     h.run_steps(3);
     h.check_accessibility();
@@ -342,6 +374,70 @@ fn every_view_names_its_controls() {
     *h.state_mut() = Some(signed_out(&h.ctx.clone(), dir.path()));
     h.run_steps(3);
     h.check_accessibility();
+}
+
+/// Each way installing Rede 0.2.0 can go.
+fn install_states() -> Vec<crate::updates::install::State> {
+    use crate::updates::install::{Error, Fallback, State};
+    let v = || crate::updates::Version::parse("0.2.0").unwrap();
+    vec![
+        State::Downloading { version: v(), received: 3_000_000, total: Some(58_000_000) },
+        State::preview_ready(v()),
+        State::Failed { version: v(), error: Error::Signature },
+        State::NotifyOnly { version: v(), reason: Fallback::ReadOnly },
+    ]
+}
+
+/// Rede 0.2.0 is out, with its release notes in.
+fn newer_version(app: &mut RedeApp) {
+    let v = crate::updates::Version::parse("0.2.0").unwrap();
+    app.update = Some(v.clone());
+    app.updates.latest = Some(v.clone());
+    app.updates.notes = Some((v, Some(Ok(vec![crate::updates::Block::Paragraph("Rede tells you when a new version is out.".into())]))));
+}
+
+#[test]
+fn the_update_notice_opens_about_with_the_new_versions_notes() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = window(dir.path(), BOOKS.len());
+    h.run_steps(2);
+    assert!(h.query_by_label("Rede 0.2.0 is available").is_none(), "no notice without a newer version");
+    newer_version(app_mut(&mut h));
+    h.run_steps(2);
+    h.get_by_label("Rede 0.2.0 is available").click();
+    h.run_steps(3);
+    assert_eq!(app_mut(&mut h).ui.settings, super::settings_page::Tab::About);
+    h.get_by_label("What's new in 0.2.0");
+    h.get_by_label("Rede tells you when a new version is out.");
+    // Folded to the rail, the gear says so and goes to About too.
+    app_mut(&mut h).apply(Action::CloseSheet);
+    app_mut(&mut h).apply(Action::OpenSettings(super::settings_page::Tab::Playback));
+    app_mut(&mut h).apply(Action::CloseSheet);
+    app_mut(&mut h).apply_prefs(PrefsAction::CollapseSidebar(true));
+    h.run_steps(3);
+    h.get_by_label(&shell::keys::shown("Settings (⌘,)\nRede 0.2.0 is available")).click();
+    h.run_steps(3);
+    assert_eq!(app_mut(&mut h).ui.settings, super::settings_page::Tab::About);
+}
+
+#[test]
+fn a_ready_update_says_so_in_the_notice_and_on_the_rails_gear() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = window(dir.path(), BOOKS.len());
+    newer_version(app_mut(&mut h));
+    app_mut(&mut h).updates.install =
+        crate::updates::install::State::Downloading { version: crate::updates::Version::parse("0.2.0").unwrap(), received: 0, total: None };
+    h.run_steps(2);
+    h.get_by_label("Downloading Rede 0.2.0…");
+    app_mut(&mut h).updates.install = crate::updates::install::State::preview_ready(crate::updates::Version::parse("0.2.0").unwrap());
+    h.run_steps(2);
+    h.get_by_label("Rede 0.2.0 is ready").click();
+    h.run_steps(3);
+    assert_eq!(app_mut(&mut h).ui.settings, super::settings_page::Tab::About);
+    app_mut(&mut h).apply(Action::CloseSheet);
+    app_mut(&mut h).apply_prefs(PrefsAction::CollapseSidebar(true));
+    h.run_steps(3);
+    h.get_by_label(&shell::keys::shown("Settings (⌘,)\nRede 0.2.0 is ready"));
 }
 
 #[test]

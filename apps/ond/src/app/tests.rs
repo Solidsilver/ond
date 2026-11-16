@@ -1435,18 +1435,18 @@ fn a_newer_release_shows_until_skipped_or_checking_is_off() {
     let ctx = egui::Context::default();
     let mut app = app(&ctx, dir.path());
     let v = Version::parse("99.0.0").unwrap();
-    app.handle(Msg::UpdateChecked(Ok(v)));
-    assert_eq!(app.update, Some(v));
+    app.handle(Msg::Update(crate::updates::UpdateMsg::Checked(Ok(crate::updates::Candidates { release: Some(v.clone()), beta: Some(v.clone()) }))));
+    assert_eq!(app.update, Some(v.clone()));
     frame(&ctx, &mut app, Vec::new());
 
-    app.apply(Action::Update(super::UpdateAction::Skip(v)));
+    app.apply(Action::Update(super::UpdateAction::Skip(v.clone())));
     assert_eq!(app.update, None);
     assert_eq!(app.prefs.get(|s| s.skipped_update.clone()).as_deref(), Some("99.0.0"));
-    app.handle(Msg::UpdateChecked(Ok(v)));
+    app.handle(Msg::Update(crate::updates::UpdateMsg::Checked(Ok(crate::updates::Candidates { release: Some(v.clone()), beta: Some(v.clone()) }))));
     assert_eq!(app.update, None, "a skipped version stays quiet");
-    assert_eq!(app.updates.latest, Some(v), "Settings › About still knows it");
+    assert_eq!(app.updates.latest, Some(v.clone()), "Settings › About still knows it");
     let next = Version::parse("99.0.1").unwrap();
-    app.handle(Msg::UpdateChecked(Ok(next)));
+    app.handle(Msg::Update(crate::updates::UpdateMsg::Checked(Ok(crate::updates::Candidates { release: Some(next.clone()), beta: Some(next.clone()) }))));
     assert_eq!(app.update, Some(next), "the next one shows");
 
     app.update_check.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -1463,21 +1463,24 @@ fn check_now_reports_how_it_went() {
     let ctx = egui::Context::default();
     let mut app = app(&ctx, dir.path());
     app.apply(Action::Update(super::UpdateAction::CheckNow));
-    assert!(app.updates.checking);
-    app.handle(Msg::UpdateChecked(Err("offline".into())));
+    assert_eq!(app.updates.checking, crate::updates::channel() == crate::updates::Channel::GitHub);
+    app.handle(Msg::Update(crate::updates::UpdateMsg::Checked(Err("offline".into()))));
     assert!(!app.updates.checking);
     assert_eq!(app.updates.error.as_deref(), Some("offline"));
 
-    app.handle(Msg::UpdateChecked(Ok(Version::current())));
+    app.handle(Msg::Update(crate::updates::UpdateMsg::Checked(Ok(crate::updates::Candidates {
+        release: Some(crate::updates::current()),
+        beta: Some(crate::updates::current()),
+    }))));
     assert!(app.updates.error.is_none() && app.updates.checked.is_some());
     assert_eq!(app.update, None, "this version isn't an update");
 
     // Notes for the version asked for land; late ones for another don't.
     let v = Version::parse("99.0.0").unwrap();
-    app.updates.notes = Some((v, None));
-    app.handle(Msg::ReleaseNotes(Version::parse("98.0.0").unwrap(), Ok(Vec::new())));
+    app.updates.notes = Some((v.clone(), None));
+    app.handle(Msg::Update(crate::updates::UpdateMsg::ReleaseNotes(Version::parse("98.0.0").unwrap(), Ok(Vec::new()))));
     assert!(app.updates.notes.as_ref().unwrap().1.is_none());
-    app.handle(Msg::ReleaseNotes(v, Ok(vec![crate::updates::Block::Heading("Opus".into())])));
+    app.handle(Msg::Update(crate::updates::UpdateMsg::ReleaseNotes(v, Ok(vec![crate::updates::Block::Heading("Opus".into())]))));
     assert!(matches!(&app.updates.notes, Some((_, Some(Ok(b)))) if b.len() == 1));
 }
 

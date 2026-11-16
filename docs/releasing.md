@@ -30,6 +30,51 @@ Use the Release workflow's **Run workflow** button on the candidate branch, once
 
 The macOS jobs use the existing `MACOS_CERTIFICATE`, `MACOS_CERTIFICATE_PASSWORD` and `APPLE_NOTARY_*` secrets, as described in [macos-signing.md](macos-signing.md). Rede's script accepts `REDE_SIGN_IDENTITY` / `REDE_NOTARY_*` for local builds and otherwise falls back to `OND_SIGN_IDENTITY` / `OND_NOTARY_*`. Without credentials a build is ad-hoc signed, **not** a notarized release.
 
+## Update signatures
+
+The publish job installs minisign 0.12 from its upstream Linux archive, checks
+its pinned SHA-256, then signs every file in `dist/`. Each `.minisig` is published
+beside its archive or dmg. A missing `UPDATE_SIGNING_KEY` produces a workflow
+warning and an unsigned release: users can download it manually, but the apps
+will refuse automatic installation. A configured key that cannot sign fails
+publication. Manual workflow runs do not publish or use the update signing key.
+
+The production public key in `shell::updates::install::PUBLIC_KEY` is:
+
+```text
+RWS8BILhZyEyhZhjHWOEkGgfkz6ZofGPH/EdWBRiGwB59QyV943Cn4BP
+```
+
+Its key id is `85322167E18204BC`. Keep its existing secret key offline and
+backed up. Set repository Actions secrets `UPDATE_SIGNING_KEY` to the **entire
+secret key file**, including its comment line, and `UPDATE_SIGNING_PASSWORD`
+to its password. The job writes a temporary mode-600 key file, feeds the
+password to minisign on stdin, and removes the file on success or failure.
+Never paste either secret into a workflow, command argument, log or commit.
+
+To create a successor key, on a trusted offline machine with minisign:
+
+```sh
+minisign -G -p update.pub -s update.key
+```
+
+Choose a strong password and keep both the secret file and password safely
+backed up offline. The second line of `update.pub` is the public constant.
+Changing that constant alone would strand existing installations: first ship
+a release **signed by the old key** that embeds the successor's public key.
+After users have installed that bridge release, change the two repository
+secrets to the successor and publish subsequent releases with it. Users who
+missed the bridge release must install manually; there is no key manifest or
+multi-key trust store. If the current secret is lost or compromised, publish
+instructions to install the next release by hand and replace both secrets and
+the public constant. Never regenerate the current production key accidentally.
+
+Verify a downloaded release before publishing its announcement:
+
+```sh
+minisign -Vm Ond-0.6.0-macos-universal.zip -P RWS8BILhZyEyhZhjHWOEkGgfkz6ZofGPH/EdWBRiGwB59QyV943Cn4BP
+```
+
 ## Human checks before the first Rede beta
 
 These are gates, not claims that testing has happened. Record the OS, architecture, server version and results in the pull request. See [TESTING.md](../TESTING.md) for detailed steps.
@@ -57,4 +102,4 @@ git push origin ond-v0.6.0 rede-v0.1.0-beta.2
 
 A version mismatch stops the workflow before building. Each release waits for all of its supported platforms; Rede intentionally skips Windows. Rede's beta is a GitHub prerelease and cannot become the repository's latest stable release. Ond's update checker ignores it.
 
-Check the published names, notes and all assets. Ond should have five archives (macOS dmg/zip, two Linux tarballs, Windows zip); Rede should have four (macOS dmg/zip and two Linux tarballs). Download and launch one published bundle from each supported platform. Don't move a published tag to fix a binary; bump the version and publish another release.
+Check the published names, notes, all assets and their `.minisig` files. Ond should have five archives (macOS dmg/zip, two Linux tarballs, Windows zip); Rede should have four (macOS dmg/zip and two Linux tarballs). Download and launch one published bundle from each supported platform. Don't move a published tag to fix a binary; bump the version and publish another release.

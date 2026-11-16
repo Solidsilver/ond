@@ -151,10 +151,8 @@ pub enum Msg {
         target: crate::app::FolderTarget,
         path: std::path::PathBuf,
     },
-    /// The update checker's latest release, or why it couldn't tell.
-    UpdateChecked(Result<crate::updates::Version, String>),
-    /// A release's notes, for Settings › About.
-    ReleaseNotes(crate::updates::Version, crate::updates::Notes),
+    /// App release checks and notes, independent of the music server.
+    Update(crate::updates::UpdateMsg),
     Error(Failure),
 }
 
@@ -434,6 +432,56 @@ struct LibrarySlot {
 }
 
 impl Bridge {
+    /// Repository updates belong to no account, so this deliberately uses
+    /// the raw sender rather than a session-scoped bridge.
+    pub fn stage_update(
+        &self,
+        state: &mut crate::updates::Updates,
+        eligible: Option<&crate::updates::Version>,
+        check: crate::updates::UpdateCheck,
+        cache: std::path::PathBuf,
+    ) {
+        let tx = self.tx.clone();
+        let notify = self.notify.clone();
+        state.stage_update(eligible, check, &self.rt, &crate::updates::OND, cache, move |event| {
+            let _ = tx.send(Msg::Update(crate::updates::UpdateMsg::Install(event)));
+            notify();
+        });
+    }
+
+    /// Cleanup is app-wide too; a live stage's lock protects other instances.
+    pub fn clean_update_stages(&self, cache: std::path::PathBuf) {
+        let tx = self.tx.clone();
+        let notify = self.notify.clone();
+        self.rt.spawn_blocking(move || {
+            if let Err(error) = crate::updates::install::startup(&cache) {
+                let _ = tx.send(Msg::Update(crate::updates::UpdateMsg::InstallError(error)));
+                notify();
+            }
+        });
+    }
+
+    /// Starts the app-wide checker, independent of account sessions. The
+    /// callback keeps only the sender and repaint notifier alive.
+    pub fn start_updates(&self, on: Arc<std::sync::atomic::AtomicBool>, now: Arc<tokio::sync::Notify>) {
+        let tx = self.tx.clone();
+        let notify = self.notify.clone();
+        crate::updates::start(&self.rt, &crate::updates::OND, crate::updates::VERSION, crate::updates::channel(), on, now, move |result| {
+            let _ = tx.send(Msg::Update(crate::updates::UpdateMsg::Checked(result)));
+            notify();
+        });
+    }
+
+    /// Fetches notes for this app's release, regardless of the active account.
+    pub fn update_notes(&self, v: crate::updates::Version) {
+        let tx = self.tx.clone();
+        let notify = self.notify.clone();
+        crate::updates::fetch_notes(&self.rt, &crate::updates::OND, crate::updates::VERSION, v.clone(), move |notes| {
+            let _ = tx.send(Msg::Update(crate::updates::UpdateMsg::ReleaseNotes(v, notes)));
+            notify();
+        });
+    }
+
     pub fn new(rt: tokio::runtime::Handle, tx: Sender<Msg>, notify: Notify, library: Arc<Library>, ond_store: Arc<crate::store::OndStore>) -> Self {
         Self {
             account_tag: None,
