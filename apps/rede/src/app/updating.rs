@@ -10,6 +10,10 @@ impl RedeApp {
     pub(super) fn update_action(&mut self, action: UpdateAction) {
         match action {
             UpdateAction::Open(v) => self.ctx.open_url(egui::OpenUrl::new_tab(v.page())),
+            UpdateAction::Install(v) => {
+                self.updates.requested = Some(v);
+                self.select_update();
+            }
             UpdateAction::Skip(v) => {
                 self.prefs.edit(|s| s.skipped_update = Some(v.to_string()));
                 self.select_update();

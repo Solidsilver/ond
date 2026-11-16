@@ -120,6 +120,24 @@ async fn verified_downloads_are_renamed_and_skipping_deletes_the_stage() {
     assert!(!dir.path().join("target").exists());
 }
 
+#[tokio::test]
+async fn without_automatic_installs_only_the_version_asked_for_downloads() {
+    let dir = tempfile::tempdir().unwrap();
+    let rt = tokio::runtime::Handle::current();
+    let mut state = Updates::default();
+    let offered = version();
+    state.stage_update(Some(&offered), UpdateCheck::Notify, &rt, &OND, dir.path().into(), |_| {});
+    assert!(matches!(state.install, State::Idle), "nothing downloads until asked");
+    state.requested = Some(offered.clone());
+    state.stage_update(Some(&offered), UpdateCheck::Notify, &rt, &OND, dir.path().into(), |_| {});
+    assert_eq!(state.install.version(), Some(&offered));
+    let newer = Version::parse("9.9.9").unwrap();
+    state.stage_update(Some(&newer), UpdateCheck::Notify, &rt, &OND, dir.path().into(), |_| {});
+    assert!(matches!(state.install, State::Idle), "a newer offer isn't installed on the old request");
+    state.stage_update(Some(&offered), UpdateCheck::Off, &rt, &OND, dir.path().into(), |_| {});
+    assert!(matches!(state.install, State::Idle), "turning checks off drops the request's download");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_partial_download_never_becomes_installable_and_is_deleted_on_cancellation() {
     let dir = tempfile::tempdir().unwrap();

@@ -180,7 +180,11 @@ impl Candidates {
 
 /// Commands shared by both apps' About pages and update notices.
 pub enum UpdateAction {
+    /// Opens the version's release page, to download it by hand.
     Open(Version),
+    /// Downloads and stages this version now, as Install updates
+    /// automatically would; Restart to Update or quitting installs it.
+    Install(Version),
     Skip(Version),
     Check(UpdateCheck),
     Channel(Option<UpdateChannel>),
@@ -222,6 +226,9 @@ pub struct Updates {
     pub install_error: Option<install::Error>,
     /// Background job ownership; use `stage_update` and `cancel_install`.
     pub installation: install::Installation,
+    /// A version the user asked to install while automatic installs are
+    /// off. It stays asked for until another version is the one on offer.
+    pub requested: Option<Version>,
 }
 
 impl Updates {
@@ -432,7 +439,9 @@ impl Updates {
         cache: std::path::PathBuf,
         send: impl Fn(install::Event) + Send + Sync + 'static,
     ) {
-        let wanted = eligible.filter(|_| check == UpdateCheck::Install);
+        let asked = |v: &&Version| check == UpdateCheck::Install || (check == UpdateCheck::Notify && self.requested.as_ref() == Some(*v));
+        let wanted = eligible.filter(asked).cloned();
+        let wanted = wanted.as_ref();
         if self.install.version() == wanted {
             return;
         }

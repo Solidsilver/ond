@@ -47,7 +47,8 @@ pub struct AboutUpdates<'a> {
 /// About's Updates group: for a GitHub copy, Check for updates, then (while
 /// it's on) Install updates automatically, and the Channel (Releases or
 /// Betas, the build's own until the user picks); then a newer version with
-/// Download and Skip, or how its download is going, or how the last look went
+/// Install, Get from GitHub and Skip, or how its download is going, or how
+/// the last look went
 /// with Check now; for any other, where its updates come from. A newer
 /// version's release notes follow in a group of their own, asked for the
 /// first time they're drawn. Returns what was asked for, in order.
@@ -169,8 +170,16 @@ fn update_status(ui: &mut Ui, about: &AboutUpdates<'_>, newer: Option<Version>, 
                     hint.push('\n');
                     hint.push_str(&why_not(app, *reason));
                 }
+                // Install keeps the download in the app; GitHub is there for a
+                // copy installed by hand, and is all a copy that can't install
+                // itself can offer.
+                let can_install = !matches!(install, Some(State::NotifyOnly { .. }));
                 row_with(ui, Head { label: &format!("{app} {v} is available"), hint: &hint, ..Default::default() }, |ui| {
-                    if primary(ui, Some(Icon::Download), "Download").clicked() {
+                    if can_install && primary(ui, Some(Icon::Download), "Install").clicked() {
+                        asked.push(UpdateAction::Install(v.clone()));
+                    }
+                    let github = if can_install { secondary(ui, "Get from GitHub") } else { primary(ui, None, "Get from GitHub") };
+                    if github.clicked() {
                         asked.push(UpdateAction::Open(v.clone()));
                     }
                     skip(ui, asked);
@@ -502,8 +511,22 @@ mod tests {
         let h = page(UpdateCheck::Install, None, newer(State::NotifyOnly { version: v("0.7.0"), reason: Fallback::Translocated }));
         h.get_by_label("Ond 0.7.0 is available");
         h.get_by_label("You have 0.6.0.\nMove Ond to Applications to install updates automatically.");
-        h.get_by_label("Download");
+        assert!(h.query_by_label("Install").is_none(), "a copy that can't install itself doesn't offer to");
+        h.get_by_label("Get from GitHub");
         h.check_accessibility();
+    }
+
+    #[test]
+    fn a_newer_version_installs_in_the_app_or_opens_its_github_page() {
+        let mut h = page(UpdateCheck::Notify, None, newer(State::Idle));
+        h.get_by_label("Ond 0.7.0 is available");
+        h.check_accessibility();
+        h.get_by_label("Install").click();
+        h.run();
+        h.get_by_label("Get from GitHub").click();
+        h.run();
+        let asked = &h.state().1.asked;
+        assert!(matches!(asked.as_slice(), [.., UpdateAction::Install(a), UpdateAction::Open(b)] if *a == v("0.7.0") && *b == v("0.7.0")));
     }
 
     #[test]
