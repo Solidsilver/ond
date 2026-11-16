@@ -10,7 +10,7 @@ Thanks for looking. Ond is a small project with one maintainer, so the process i
 
 ## Branches and commits
 
-`dev` is where work happens and `main` holds the latest release. Branch from `dev` and open your pull request against `dev`.
+`dev` is where work happens and betas are tagged; `main` holds the latest full release. Branch from `dev` and open your pull request against `dev`.
 
 Commits: a subject of at most 72 characters, a blank line, then a body that says why. Commit in logical units; a rename or module move goes in its own commit so `git blame` survives it. Don't add AI attribution trailers; AI use is disclosed in the README.
 
@@ -37,7 +37,7 @@ Fine, and most of Ond was written that way. The result is held to the same bar a
 
 ## Releases
 
-The maintainer prepares the version bump and notes on `dev`, runs the [release checklist](docs/releasing.md), then merges into `main` and tags the tested commit. The release workflow builds and signs the bundles and publishes them under the app's own name.
+The maintainer prepares the version bump and notes on `dev` and runs the [release checklist](docs/releasing.md). A beta is tagged on `dev`; a full release fast-forwards `main` to the tested `dev` commit and is tagged there. The release workflow builds and signs the bundles and publishes them under the app's own name.
 
 Each app in the repository has its own tags and notes, because Ond and Rede release separately from the same repository:
 

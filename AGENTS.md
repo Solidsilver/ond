@@ -79,7 +79,7 @@ These are the things a careful reader would still get wrong. Each has a test whe
 
 ## Git
 
-- `dev` is where work happens; `main` holds the latest release. Branch from `dev` (`fix/...`, `feat/...`) and merge back into `dev`.
+- `dev` is where work happens and betas are tagged; `main` holds the latest full release and only fast-forwards to `dev` ([releasing](docs/releasing.md)). Never commit to `main`. Branch from `dev` (`fix/...`, `feat/...`) and merge back into `dev`.
 - Commit subjects are at most 72 characters; put the why in the body after a blank line. Commit in logical units; a module move is its own commit so blame survives.
 - No AI attribution in commits, pull requests or release notes. AI use is disclosed once, in the README, with the 0rwx AI:X label.
 - Don't commit `docs/tickets/`, `target/`, `result` or editor files; `.gitignore` already covers them.

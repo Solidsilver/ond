@@ -37,12 +37,30 @@ jobs:
       prerelease: ${{ steps.tag.outputs.prerelease }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          # Every branch, to check which one the tag is on.
+          fetch-depth: 0
 
       - name: App and version
         id: tag
         env:
           MANUAL_APP: ${{ inputs.app || 'ond' }}
         run: bash scripts/release-tag.sh "$MANUAL_APP" >> "$GITHUB_OUTPUT"
+
+      # Betas are tagged on dev and full releases on main, which only ever
+      # fast-forwards to dev (docs/releasing.md). A tag elsewhere would publish
+      # untested code, or leave a changelog unable to find the tag before it.
+      - name: Release branch
+        if: github.event_name == 'push'
+        env:
+          PRERELEASE: ${{ steps.tag.outputs.prerelease }}
+        run: |
+          branch=main
+          if [ "$PRERELEASE" = "true" ]; then branch=dev; fi
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" "origin/$branch"; then
+            echo "::error::$GITHUB_REF_NAME must be tagged on a commit in $branch" >&2
+            exit 1
+          fi
 
   macos:
     needs: tag

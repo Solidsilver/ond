@@ -1,11 +1,16 @@
 # Releasing Ond and Rede
 
-The apps release independently from this repository. Release preparation belongs on `dev`; merge the tested changes into `main` before tagging. Don't tag until the bundles have been tried.
+The apps release independently from this repository. Release preparation belongs on `dev`. Don't tag until the bundles have been tried.
+
+- **Betas** are tagged on `dev`.
+- **Full releases** are tagged on `main`, after fast-forwarding it to the tested `dev` commit. `main` never gets a commit of its own, so it stays the latest full release and every release tag is also on `dev`. The changelog of a beta needs that to find the tag before it.
+
+The release workflow refuses a beta tag that isn't on `dev` and a full release tag that isn't on `main`.
 
 ## Versions and notes
 
-- **Ond 0.6.0:** workspace version in `Cargo.toml`, including the shared crates. Keep internal path-dependency version requirements in sync. Notes: `.github/release-notes/ond/v0.6.0.md`. Tag: `ond-v0.6.0`.
-- **Rede 0.1.0-beta.2:** separate package version in `apps/rede/Cargo.toml`. Notes: `.github/release-notes/rede/v0.1.0-beta.2.md`. Tag: `rede-v0.1.0-beta.2`.
+- **Ond 0.7.0-beta.1:** workspace version in `Cargo.toml`, including the shared crates. Keep internal path-dependency version requirements in sync. Notes: `.github/release-notes/ond/v0.7.0-beta.1.md`. Tag: `ond-v0.7.0-beta.1`.
+- **Rede 0.1.0-beta.3:** separate package version in `apps/rede/Cargo.toml`. Notes: `.github/release-notes/rede/v0.1.0-beta.3.md`. Tag: `rede-v0.1.0-beta.3`.
 
 Update `Cargo.lock` with Cargo, not by upgrading every dependency. Check download filenames, documentation links and AppStream metadata. Rede's macOS marketing version is numeric (`0.1.0`); About, archive names and the release tag retain the beta suffix. Its bundle build number is the commit count.
 
@@ -92,12 +97,23 @@ Linux beta limitations must stay visible in the release notes: no browser/OpenID
 
 ## Publish
 
-Only after checks and the merge, tag the tested `main` commit. These commands publish releases when pushed:
+Only after the checks, tag the tested commit. These commands publish releases when pushed.
+
+A beta, on `dev`:
 
 ```sh
+git switch dev && git pull --ff-only
+git tag -a rede-v0.1.0-beta.3 -m "Rede 0.1.0 beta 3"
+git push origin rede-v0.1.0-beta.3
+```
+
+A full release, on `main` moved up to `dev` (if the fast-forward fails, `main` has a commit `dev` lacks; merge `main` into `dev` and test again):
+
+```sh
+git switch main && git pull --ff-only
+git merge --ff-only dev
 git tag -a ond-v0.6.0 -m "Ond 0.6.0"
-git tag -a rede-v0.1.0-beta.2 -m "Rede 0.1.0 beta 2"
-git push origin ond-v0.6.0 rede-v0.1.0-beta.2
+git push origin main ond-v0.6.0
 ```
 
 A version mismatch stops the workflow before building. Each release waits for all of its supported platforms; Rede intentionally skips Windows. Rede's beta is a GitHub prerelease and cannot become the repository's latest stable release. Ond's update checker ignores it.
