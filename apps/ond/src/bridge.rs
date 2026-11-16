@@ -2231,9 +2231,14 @@ mod tests {
         got.clear();
 
         let (release, held) = std::sync::mpsc::channel::<()>();
-        bridge.offline_job(move |_| {
+        bridge.offline_job(move |b| {
+            b.post(Msg::Latency(None));
             let _ = held.recv();
         });
+        // The job reaches the blocking thread only once the runtime runs, so
+        // wait until it holds it; otherwise the read could take it first.
+        until(&rt, &rx, &mut got, |m| m.iter().any(|m| matches!(m, Msg::Latency(_))));
+        got.clear();
         bridge.load_local(None);
         // The saved login turned out to be another account: its session ends
         // (see `OndApp::connected`) while the read still waits.
