@@ -9,8 +9,8 @@ The release workflow refuses a beta tag that isn't on `dev` and a full release t
 
 ## Versions and notes
 
-- **Ond 0.7.0-beta.1:** workspace version in `Cargo.toml`, including the shared crates. Keep internal path-dependency version requirements in sync. Notes: `.github/release-notes/ond/v0.7.0-beta.1.md`. Tag: `ond-v0.7.0-beta.1`.
-- **Rede 0.1.0-beta.3:** separate package version in `apps/rede/Cargo.toml`. Notes: `.github/release-notes/rede/v0.1.0-beta.3.md`. Tag: `rede-v0.1.0-beta.3`.
+- **Ond 0.7.0-beta.2:** workspace version in `Cargo.toml`, including the shared crates. Keep internal path-dependency version requirements in sync. Notes: `.github/release-notes/ond/v0.7.0-beta.2.md`. Tag: `ond-v0.7.0-beta.2`.
+- **Rede 0.1.0-beta.4:** separate package version in `apps/rede/Cargo.toml`. Notes: `.github/release-notes/rede/v0.1.0-beta.4.md`. Tag: `rede-v0.1.0-beta.4`.
 
 Update `Cargo.lock` with Cargo, not by upgrading every dependency. Check download filenames, documentation links and AppStream metadata. Rede's macOS marketing version is numeric (`0.1.0`); About, archive names and the release tag retain the beta suffix. Its bundle build number is the commit count.
 
@@ -103,8 +103,8 @@ A beta, on `dev`:
 
 ```sh
 git switch dev && git pull --ff-only
-git tag -a rede-v0.1.0-beta.3 -m "Rede 0.1.0 beta 3"
-git push origin rede-v0.1.0-beta.3
+git tag -a rede-v0.1.0-beta.4 -m "Rede 0.1.0 beta 4"
+git push origin rede-v0.1.0-beta.4
 ```
 
 A full release, on `main` moved up to `dev` (if the fast-forward fails, `main` has a commit `dev` lacks; merge `main` into `dev` and test again):
