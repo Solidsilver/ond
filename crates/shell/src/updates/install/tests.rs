@@ -177,8 +177,12 @@ async fn stale_stages_remove_only_the_replacement_copy_they_own() {
     let neighbor_path = neighbor.keep();
     let unrelated = destination.path().join(".update-unrelated");
     fs::create_dir(&unrelated).unwrap();
-    clean_stale(cache.path()).unwrap();
-    assert!(!stage_path.exists());
+    // A process another test spawns at this moment briefly shares the
+    // stage's lock descriptor, and a sweep leaves a locked stage alone.
+    wait_until("the sweep to remove the stale stage", || {
+        clean_stale(cache.path()).unwrap();
+        !stage_path.exists()
+    });
     assert!(!neighbor_path.exists());
     assert!(unrelated.exists());
 }
