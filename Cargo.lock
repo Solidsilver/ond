@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "abs"
-version = "0.7.0-beta.2"
+version = "0.7.0-beta.3"
 dependencies = [
  "base64",
  "getrandom 0.4.3",
@@ -129,7 +129,7 @@ dependencies = [
 
 [[package]]
 name = "accounts"
-version = "0.7.0-beta.2"
+version = "0.7.0-beta.3"
 dependencies = [
  "serde",
  "serde_json",
@@ -207,7 +207,7 @@ dependencies = [
 
 [[package]]
 name = "analysis"
-version = "0.7.0-beta.2"
+version = "0.7.0-beta.3"
 dependencies = [
  "ebur128",
  "postcard",
@@ -511,7 +511,7 @@ dependencies = [
 
 [[package]]
 name = "audio"
-version = "0.7.0-beta.2"
+version = "0.7.0-beta.3"
 dependencies = [
  "alsa",
  "coreaudio-rs",
@@ -2542,7 +2542,7 @@ checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
 
 [[package]]
 name = "library"
-version = "0.7.0-beta.2"
+version = "0.7.0-beta.3"
 dependencies = [
  "postcard",
  "redb",
@@ -3441,7 +3441,7 @@ dependencies = [
 
 [[package]]
 name = "offline"
-version = "0.7.0-beta.2"
+version = "0.7.0-beta.3"
 dependencies = [
  "libc",
  "reqwest",
@@ -3463,7 +3463,7 @@ checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 
 [[package]]
 name = "ond-player"
-version = "0.7.0-beta.2"
+version = "0.7.0-beta.3"
 dependencies = [
  "accounts",
  "analysis",
@@ -4049,7 +4049,7 @@ dependencies = [
 
 [[package]]
 name = "rede"
-version = "0.1.0-beta.4"
+version = "0.1.0-beta.5"
 dependencies = [
  "abs",
  "accounts",
@@ -4424,7 +4424,7 @@ dependencies = [
 
 [[package]]
 name = "scan"
-version = "0.7.0-beta.2"
+version = "0.7.0-beta.3"
 dependencies = [
  "notify",
  "serde",
@@ -4603,7 +4603,7 @@ dependencies = [
 
 [[package]]
 name = "shelf"
-version = "0.7.0-beta.2"
+version = "0.7.0-beta.3"
 dependencies = [
  "accounts",
  "postcard",
@@ -4617,7 +4617,7 @@ dependencies = [
 
 [[package]]
 name = "shell"
-version = "0.7.0-beta.2"
+version = "0.7.0-beta.3"
 dependencies = [
  "accounts",
  "block2 0.6.2",
@@ -4815,7 +4815,7 @@ dependencies = [
 
 [[package]]
 name = "sources"
-version = "0.7.0-beta.2"
+version = "0.7.0-beta.3"
 dependencies = [
  "abs",
  "accounts",
@@ -4862,7 +4862,7 @@ checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
 
 [[package]]
 name = "streamcache"
-version = "0.7.0-beta.2"
+version = "0.7.0-beta.3"
 dependencies = [
  "bytes",
  "reqwest",
@@ -4880,7 +4880,7 @@ checksum = "fe895eb47f22e2ddd4dabc02bce419d2e643c8e3b585c78158b349195bc24d82"
 
 [[package]]
 name = "subsonic"
-version = "0.7.0-beta.2"
+version = "0.7.0-beta.3"
 dependencies = [
  "hex",
  "md-5",
@@ -5203,7 +5203,7 @@ dependencies = [
 
 [[package]]
 name = "testkit"
-version = "0.7.0-beta.2"
+version = "0.7.0-beta.3"
 dependencies = [
  "serde_json",
 ]
