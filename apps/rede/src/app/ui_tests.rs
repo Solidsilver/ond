@@ -415,7 +415,7 @@ fn the_update_notice_opens_about_with_the_new_versions_notes() {
     app_mut(&mut h).apply(Action::CloseSheet);
     app_mut(&mut h).apply_prefs(PrefsAction::CollapseSidebar(true));
     h.run_steps(3);
-    h.get_by_label("Settings (⌘,)\nRede 0.2.0 is available").click();
+    h.get_by_label(&shell::keys::shown("Settings (⌘,)\nRede 0.2.0 is available")).click();
     h.run_steps(3);
     assert_eq!(app_mut(&mut h).ui.settings, super::settings_page::Tab::About);
 }
@@ -437,7 +437,7 @@ fn a_ready_update_says_so_in_the_notice_and_on_the_rails_gear() {
     app_mut(&mut h).apply(Action::CloseSheet);
     app_mut(&mut h).apply_prefs(PrefsAction::CollapseSidebar(true));
     h.run_steps(3);
-    h.get_by_label("Settings (⌘,)\nRede 0.2.0 is ready");
+    h.get_by_label(&shell::keys::shown("Settings (⌘,)\nRede 0.2.0 is ready"));
 }
 
 #[test]
