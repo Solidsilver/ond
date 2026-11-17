@@ -20,14 +20,8 @@
   <url type="bugtracker">https://github.com/Solidsilver/ond/issues</url>
   <content_rating type="oars-1.1"/>
   <releases>
-    <release version="0.1.0-beta.6" date="2026-11-17" type="development">
-      <description><p>A test release for installing an update from Settings.</p></description>
-    </release>
-    <release version="0.1.0-beta.5" date="2026-11-16" type="development">
+    <release version="0.1.0-beta.7" date="2026-11-17" type="development">
       <description><p>Install an update from Settings without turning on automatic installs.</p></description>
-    </release>
-    <release version="0.1.0-beta.4" date="2026-11-16" type="development">
-      <description><p>A fourth beta for trying an update that installs itself.</p></description>
     </release>
     <release version="0.1.0-beta.3" date="2026-11-15" type="development">
       <description><p>Update checks, and updates that install themselves.</p></description>
