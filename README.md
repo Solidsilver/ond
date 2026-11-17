@@ -4,7 +4,7 @@ Ond is a native music player for [Navidrome](https://www.navidrome.org), other O
 
 I wanted a client that treats playback quality as the main feature and stays out of the way otherwise. Ond plays your original files, tells you exactly what happens to the signal on its way to the speakers, and keeps the interface quiet unless you ask for more.
 
-This repository also contains **[Rede](docs/rede/README.md)**, a native Audiobookshelf player. Its fifth beta is available for macOS and Linux; Ond and Rede install and keep their data separately.
+This repository also contains **[Rede](docs/rede/README.md)**, a native Audiobookshelf player. Its sixth beta is available for macOS and Linux; Ond and Rede install and keep their data separately.
 
 Note: Ond was built using LLMs. See [AI Disclosure](#ai-disclosure)
 
